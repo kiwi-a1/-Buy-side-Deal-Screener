@@ -344,6 +344,13 @@ th[aria-sort="descending"] .sortbtn::after { content: "↓"; opacity: 1; }
 .fchip { border: 0; background: var(--sunken); color: var(--text); min-height: 36px; padding: 0 14px; border-radius: var(--radius-sm); }
 .fchip:hover { background: #E1E6ED; } .fchip[aria-pressed="true"] { background: var(--primary); color: #fff; }
 
+/* thesis editor: tag box and suggestion chips are filled, not outlined */
+.tags { border: 0; background: var(--sunken); }
+.tags:focus-within { outline: 2px solid var(--primary); outline-offset: 1px; background: var(--surface); }
+.tags input { background: transparent; }
+.sugg, .sugg--region, .sugg--preset, .sugg:hover { border: 0; background: var(--sunken); min-height: 36px; border-radius: var(--radius-sm); }
+.sugg:hover { background: var(--primary-tint); } .sugg--region { background: var(--primary-tint); color: var(--primary); }
+
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 @media print {
   .topbar, .toc, .ractions, .whatif, .skip-link, .toast, .filters { display: none !important; }

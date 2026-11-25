@@ -104,16 +104,18 @@ async function refreshTheses() {
   try { theses = (await api("/api/theses")).filter((t) => t.data); } catch { theses = []; }
   const usable = theses.filter((t) => !t.errors.length);
   const sel = $("#thesis-select"), saved = localStorage.getItem("thesisId");     // "" means the user last chose an open screening
-  sel.innerHTML = `<option value="">Open screening: any country, stage and sector</option>` +
-    theses.map((t) => `<option value="${t.id}"${t.errors.length ? " disabled" : ""}>${esc(t.name)}${t.errors.length ? " (needs fixing)" : ""}</option>`).join("");
-  const keep = saved === "" ? null : usable.find((t) => String(t.id) === String(saved)) || usable[0];
+  sel.innerHTML = `${""}` +
+    theses.map((t) => `<option value="${t.id}"${t.errors.length ? " disabled" : ""}>${esc(t.name)}${t.errors.length ? " (needs fixing)" : ""}</option>`).join("") +
+    `<option value="">Open screening (not recommended)</option>`;                   // last on purpose: a fund thesis is the main way to screen
+  const keep = usable.find((t) => String(t.id) === String(saved)) || usable[0];
   sel.value = keep ? String(keep.id) : "";
+  sel.hidden = theses.length === 0;                // no theses yet: the main action is adding one
   showThesisSummary();
 }
 function showThesisSummary() {
   const t = selectedThesis(), el = $("#thesis-summary");
   if (!t) {
-    el.textContent = "No thesis: the company is screened openly (any country, stage and sector, standard thresholds, default weights). A thesis gives better results.";
+    el.textContent = theses.length ? "Open screening (not recommended): any country, stage and sector, standard thresholds, default weights. A fund thesis gives better results." : "No fund thesis yet. Add one for the best results, or run an open screening (not recommended): any country, stage and sector, standard thresholds, default weights.";
     $("#thesis-edit").hidden = true; localStorage.setItem("thesisId", ""); return;
   }
   $("#thesis-edit").hidden = false;
@@ -554,7 +556,7 @@ async function loadHistory() {
   const funds = [...new Set(historyRows.map((r) => r.thesis_name).filter(Boolean))].sort();
   const fsel = $("#fund-filter");
   fsel.hidden = funds.length < 2;                                   // only useful with more than one fund
-  fsel.innerHTML = `<option value="">All funds</option>` + funds.map((f) => `<option value="${esc(f)}"${f === historyFund ? " selected" : ""}>${esc(f)}</option>`).join("");
+  fsel.innerHTML = `All funds</option>` + funds.map((f) => `<option value="${esc(f)}"${f === historyFund ? " selected" : ""}>${esc(f)}</option>`).join("");
   if (!funds.includes(historyFund)) historyFund = "";
   renderHistory();
 }

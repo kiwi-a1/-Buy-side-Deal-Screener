@@ -30,7 +30,7 @@ async function loadThesis(arg) {
   if (!editing) { setHead("Fund theses", "Each fund thesis is a mandate: what you invest in and how much each factor counts. Choose one for every screening."); return renderThesisList(); }
   if (arg === "new") {
     thesisId = null; thesisData = structuredClone(sug.blank); thesisYaml = ""; setDirty(false);
-    setHead("New fund thesis", "Start from a template or fill it in yourself. Nothing is saved until you click Save.");
+    setHead("New fund thesis", "Fill in your mandate: geography, stages, sectors, round size and weights. Nothing is saved until you click Save.");
     return renderEditor();
   }
   try {
@@ -49,11 +49,7 @@ async function renderThesisList() {
   const el = $("#thesis-list");
   let rows;
   try { rows = await api("/api/theses"); } catch (err) { el.innerHTML = `<p class="form-error">${esc(err.message)}</p>`; return; }
-  if (!rows.length) {
-    el.innerHTML = `<div class="panel gate"><h2 class="h2">No fund theses yet</h2><p class="muted">Create one to start screening. Pick a template (CEE seed, US seed, European Series A, global growth) or build your own.</p>
-      <div class="presets">${sug.templates.map((t, i) => `<button type="button" class="btn btn--ghost btn--sm" data-newfrom="${i}">${esc(t.label)}</button>`).join("")}<a class="btn btn--primary btn--sm" href="#/thesis/new">Start blank</a></div></div>`;
-    return;
-  }
+  if (!rows.length) { location.replace("#/thesis/new"); return; }          // nothing yet: go straight to the full form
   el.innerHTML = `<div class="thesis-grid">${rows.map((t) => {
     const s = t.summary, bad = t.errors && t.errors.length;
     return `<article class="thesis-card" aria-labelledby="tc-${t.id}">
@@ -191,8 +187,6 @@ function renderEditor(warnings = []) {
   if (pending !== null && thesisId === null) { sessionStorage.removeItem("thesisTemplate"); thesisData = structuredClone(sug.templates[Number(pending)].data); setDirty(true); return renderEditor(); }
   $("#thesis-form").innerHTML = `
     <p><a href="#/thesis">← All fund theses</a></p>
-    ${thesisId === null ? `<div class="card card--template"><h2>Start from a template</h2><p class="small muted">Fills the whole form. Nothing is saved until you click "Save".</p>
-      <div class="presets">${sug.templates.map((tp, i) => `<button type="button" class="btn btn--ghost btn--sm" data-template="${i}">${esc(tp.label)}</button>`).join("")}</div></div>` : ""}
     ${warnings.length ? `<div class="field-note field-note--warn" role="status"><strong>Worth a look:</strong> ${warnings.map(esc).join(" ")}</div>` : ""}
     <div class="card"><h2>Fund</h2>
       <div class="field"><label class="label" for="fund_name">Name <span class="req" aria-hidden="true">*</span><span class="visually-hidden">(required)</span></label>
