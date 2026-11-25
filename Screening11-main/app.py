@@ -5,6 +5,8 @@ background thread (the Groq free tier is ~8k tokens/minute, so running two at on
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -16,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -26,7 +29,9 @@ from pydantic import BaseModel
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from screening.intake import MAX_FILE_BYTES, MAX_RESOURCES, IntakeError, check_upload, normalize_url  # noqa: E402
-from screening.llm import LLM, LLMError  # noqa: E402
+from screening.keys import (all_candidates, candidates_for, public_row, sync_env, test_candidate, validate_new)  # noqa: E402
+from screening.llm import LLM, Health, LLMError  # noqa: E402
+from screening.providers import CATALOG, Candidate  # noqa: E402
 from screening.pdf import build_pdf  # noqa: E402
 from screening.pipeline import STEPS, Inputs, analyse  # noqa: E402
 from screening.report import to_markdown  # noqa: E402
@@ -56,32 +61,109 @@ def import_legacy_thesis(path: Path = LEGACY_PATH) -> None:
 
 
 import_legacy_thesis()
+sync_env(store)
 POOL = ThreadPoolExecutor(max_workers=1)
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 
 
+HTTP = httpx.Client()
+HEALTH = Health()   # which AI providers are cooling down; shared by every screening in this process
+
+
 def make_llm(on_status) -> LLM:  # replaced in tests
-    return LLM(on_status=on_status)
+    sync_env(store)
+    return LLM(all_candidates(store), on_status=on_status, http=HTTP, health=HEALTH)
 
 
 RUN_KW: dict = {}  # extra keyword arguments for analyse(); tests inject fake crawl/search here
 
 
+# ---------- access control ----------
+# Local mode (no APP_PASSWORD): only localhost is served. Hosted mode: set APP_PASSWORD and every page and API call needs the login cookie.
+SESSION_DAYS = 14
+FAILS: dict[str, list[float]] = {}   # ip -> times of recent wrong passwords (in memory: resets on restart, fine for one person)
+
+
+def _password() -> str:
+    return os.getenv("APP_PASSWORD", "")
+
+
+def _sign(expiry: int) -> str:
+    return f"{expiry}.{hmac.new(_password().encode(), str(expiry).encode(), hashlib.sha256).hexdigest()}"
+
+
+def _logged_in(request: Request) -> bool:
+    exp, _, sig = (request.cookies.get("session") or "").partition(".")
+    return exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(_sign(int(exp)), f"{exp}.{sig}")
+
+
+LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Deal Screening</title><link rel="stylesheet" href="/static/style.css"></head><body>
+<main class="container" style="max-width:420px;padding-top:12vh"><form class="panel" id="f"><h1 class="h2">Deal Screening</h1>
+<p class="muted">Enter the password to continue.</p><div class="field"><label class="label" for="p">Password</label>
+<input type="password" id="p" autocomplete="current-password" autofocus></div><p class="form-error" id="e" role="alert" hidden></p>
+<button class="btn btn--primary" type="submit">Sign in</button></form></main><script>
+document.getElementById("f").addEventListener("submit",async(ev)=>{ev.preventDefault();const e=document.getElementById("e");e.hidden=true;
+const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json","X-Requested-With":"screening"},body:JSON.stringify({password:document.getElementById("p").value})});
+if(r.ok){location.href="/";return;}const d=await r.json().catch(()=>({}));e.textContent=d.detail||"Sign in failed";e.hidden=false;});
+</script></body></html>"""
+
+
 @app.middleware("http")
 async def local_only(request: Request, call_next):
-    # Only answer requests addressed to this machine (blocks DNS-rebinding), and require a custom header on
-    # anything that changes state, so other websites open in your browser cannot trigger screenings or edits.
-    host = request.headers.get("host") or ""
-    host = host.split("]")[0] + "]" if host.startswith("[") else host.rsplit(":", 1)[0]  # strip the port
-    if host not in LOCAL_HOSTS:
-        return JSONResponse({"detail": "This app only serves localhost."}, status_code=403)
+    # Writes need a custom header, so other websites open in your browser cannot trigger screenings or edits.
+    path = request.url.path
+    if _password():
+        if path not in ("/login", "/api/login") and not path.startswith("/static/") and not _logged_in(request):
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Sign in required."}, status_code=401)
+            return Response(status_code=303, headers={"Location": "/login"})
+    else:  # also blocks DNS-rebinding
+        host = request.headers.get("host") or ""
+        host = host.split("]")[0] + "]" if host.startswith("[") else host.rsplit(":", 1)[0]  # strip the port
+        if host not in LOCAL_HOSTS:
+            return JSONResponse({"detail": "This app only serves localhost."}, status_code=403)
     if request.method in ("POST", "PUT", "DELETE") and request.headers.get("x-requested-with") != "screening":
         return JSONResponse({"detail": "Missing X-Requested-With header."}, status_code=403)
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache"  # always revalidate, so an updated app is never shown with stale CSS/JS
     return response
+
+
+@app.get("/login")
+def login_page():
+    return Response(LOGIN_PAGE, media_type="text/html")
+
+
+class LoginBody(BaseModel):
+    password: str = ""
+
+
+@app.post("/api/login")
+def login(body: LoginBody, request: Request):
+    if not _password():
+        return {"ok": True}
+    ip = request.client.host if request.client else "?"
+    recent = [t for t in FAILS.get(ip, []) if t > time.time() - 300]
+    if len(recent) >= 5:
+        raise HTTPException(429, "Too many wrong passwords. Wait a few minutes and try again.")
+    if not hmac.compare_digest(body.password.encode(), _password().encode()):
+        FAILS[ip] = recent + [time.time()]
+        raise HTTPException(401, "Wrong password.")
+    FAILS.pop(ip, None)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("session", _sign(int(time.time()) + SESSION_DAYS * 86400), max_age=SESSION_DAYS * 86400, httponly=True, samesite="strict",
+                    secure=request.headers.get("x-forwarded-proto") == "https")
+    return resp
+
+
+@app.post("/api/logout")
+def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("session")
+    return resp
 
 
 @app.get("/")
@@ -96,7 +178,9 @@ def health():
         profiles_error = None
     except ProfilesError as e:
         profiles_error = str(e)
-    return {"key": bool(os.getenv("GROQ_API_KEY")), "theses": len(store.list_theses()), "tpm": int(os.getenv("GROQ_TPM_LIMIT") or 8000),
+    sync_env(store)
+    cands = all_candidates(store)
+    return {"key": bool(cands), "ai": cands[0].label if cands else None, "ai_count": len({c.key_id for c in cands}), "theses": len(store.list_theses()),
             "search": "Serper" if os.getenv("SERPER_API_KEY") else "free web search", "profiles_error": profiles_error}
 
 
@@ -126,8 +210,9 @@ def _run(job_id: str, inp: Inputs, thesis: Thesis, thesis_id: int) -> None:
 @app.post("/api/screen")
 async def start_screen(deck: Optional[UploadFile] = File(None), website: str = Form(""), hint: str = Form(""),
                        thesis_id: str = Form(""), resources: list[UploadFile] = File(default=[])):
-    if not os.getenv("GROQ_API_KEY"):
-        raise HTTPException(400, "No GROQ_API_KEY found. Add your free Groq key to the .env file and restart the app.")
+    sync_env(store)
+    if not all_candidates(store):
+        raise HTTPException(400, "Add an AI key first (Anthropic, OpenAI, Gemini, OpenRouter, Groq or another provider) under AI keys.")
     if not store.list_theses():
         raise HTTPException(400, "Create a fund thesis first: it defines what each company is compared against.")
     row = store.get_thesis(int(thesis_id)) if thesis_id.strip().isdigit() else None
@@ -255,6 +340,110 @@ def rescore(run_id: int, body: Rescore):
     return {k: ev[k] for k in ("decision", "decision_reason", "overall", "overall_raw", "adjustment", "weights", "scores")}
 
 
+# ---------- AI keys ----------
+class KeyBody(BaseModel):
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    label: Optional[str] = None
+    enabled: Optional[bool] = None
+    move: Optional[str] = None
+    skip_test: bool = False
+
+
+def _catalog() -> list[dict]:
+    return [{"id": k, "label": c["label"], "hint": c["hint"], "needs_model": c["needs_model"], "needs_base_url": c["needs_base_url"],
+             "env": c["env"], "default_model": c["default"], "free_tier": k == "groq"} for k, c in sorted(CATALOG.items(), key=lambda kv: kv[1]["rank"])]
+
+
+def _keys_payload() -> dict:
+    sync_env(store)
+    rows = [public_row(r, HEALTH) for r in store.list_keys()]
+    return {"providers": _catalog(), "keys": rows, "ready": any(r["status"] in ("ready", "cooling") for r in rows)}
+
+
+@app.get("/api/llm-keys")
+def list_llm_keys():
+    return _keys_payload()
+
+
+@app.post("/api/llm-keys")
+def add_llm_key(body: KeyBody):
+    provider, key, model, base = body.provider or "", (body.api_key or "").strip(), (body.model or "").strip(), (body.base_url or "").strip()
+    problem = validate_new(provider, key, model, base)
+    if problem:
+        raise HTTPException(400, problem)
+    cfg = CATALOG[provider]
+    cand = Candidate(provider=provider, label=body.label or cfg["label"], kind=cfg["kind"], base_url=base or cfg["base_url"], api_key=key,
+                     model=model or cfg["default"])
+    if not body.skip_test:
+        result = test_candidate(HTTP, cand)
+        if not result["ok"]:
+            return JSONResponse({"detail": result["error"], "kind": result["kind"], "can_save_anyway": result["kind"] != "auth"}, status_code=400)
+        model = model or result["model"]
+    key_id = store.add_key(provider, (body.label or cfg["label"]).strip()[:60], key, model=model, base_url=base)
+    return {"key": public_row(store.get_key(key_id), HEALTH), **_keys_payload()}
+
+
+@app.post("/api/llm-keys/{key_id}/test")
+def test_llm_key(key_id: int):
+    row = store.get_key(key_id)
+    if row is None:
+        raise HTTPException(404, "No such key.")
+    cands = candidates_for({**row, "enabled": 1}, os.environ)
+    if not cands:
+        raise HTTPException(400, "This key is incomplete (no key value, or the service needs a base URL and model).")
+    result = test_candidate(HTTP, cands[0])
+    if result["ok"]:
+        HEALTH.clear(cands[0])
+        for c in cands[1:]:
+            HEALTH.clear(c)
+        if not row["model"] and row["provider"] != "groq":
+            store.update_key(key_id, model=result["model"])
+    return result
+
+
+@app.put("/api/llm-keys/{key_id}")
+def update_llm_key(key_id: int, body: KeyBody):
+    row = store.get_key(key_id)
+    if row is None:
+        raise HTTPException(404, "No such key.")
+    if body.move:
+        if body.move not in ("up", "down"):
+            raise HTTPException(400, "move must be 'up' or 'down'.")
+        store.move_key(key_id, body.move)
+    fields = {}
+    if body.enabled is not None:
+        fields["enabled"] = 1 if body.enabled else 0
+    if body.model is not None:
+        fields["model"] = body.model.strip()
+    if body.label is not None and body.label.strip():
+        fields["label"] = body.label.strip()[:60]
+    if body.base_url is not None:
+        fields["base_url"] = body.base_url.strip()
+    if body.api_key and row["source"] == "app":
+        if validate_new(row["provider"], body.api_key, "x", "https://x.x"):
+            raise HTTPException(400, "That does not look like an API key.")
+        fields["api_key"] = body.api_key.strip()
+    store.update_key(key_id, **fields)
+    for c in candidates_for({**store.get_key(key_id), "enabled": 1}, os.environ):
+        HEALTH.clear(c)                                     # an edited key deserves a fresh start
+    return _keys_payload()
+
+
+@app.delete("/api/llm-keys/{key_id}")
+def delete_llm_key(key_id: int):
+    row = store.get_key(key_id)
+    if row is None:
+        raise HTTPException(404, "No such key.")
+    if row["source"] == "env":
+        raise HTTPException(400, f"This key comes from the environment variable {CATALOG[row['provider']]['env'][0]}. "
+                                 "Remove that variable to delete it, or switch it off here.")
+    store.delete_key(key_id)
+    return _keys_payload()
+
+
 # ---------- fund theses ----------
 class ThesisBody(BaseModel):
     text: Optional[str] = None   # YAML (advanced editor)
@@ -352,5 +541,8 @@ def duplicate_thesis(thesis_id: int):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT") or 8501)
+    host = os.getenv("HOST") or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1") and not _password():
+        raise SystemExit("Refusing to listen on a public address without a password. Set APP_PASSWORD (a long one) and start again.")
     print(f"\n  Deal Screening is running:  http://localhost:{port}\n  (Ctrl-C to stop)\n")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=True, forwarded_allow_ips="*")

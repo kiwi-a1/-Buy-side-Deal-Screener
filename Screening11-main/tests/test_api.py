@@ -1,6 +1,7 @@
-"""API tests: real FastAPI app with fake Groq / crawl / search, temp database and thesis file."""
+"""API tests: real FastAPI app with a fake AI server / crawl / search and a temporary database."""
 import time
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -8,7 +9,7 @@ import app as server
 from screening import suggestions as sg
 from screening.llm import LLM
 from screening.store import Store
-from tests.fakes import DECK_TEXT, FakeClient, assessment, fake_crawl, fake_search, make_pdf, router
+from tests.fakes import DECK_TEXT, assessment, candidate, fake_crawl, fake_http, fake_search, make_pdf, router
 
 H = {"X-Requested-With": "screening"}
 PDF = make_pdf(DECK_TEXT)
@@ -16,10 +17,12 @@ PDF = make_pdf(DECK_TEXT)
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "LLM_CUSTOM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)                           # the machine's own keys must never leak into tests
     monkeypatch.setattr(server, "store", Store(tmp_path / "t.db"))
-    monkeypatch.setattr(server, "make_llm", lambda on_status: LLM(client=FakeClient([router(assess=assessment(8))] * 12),
-                                                                  on_status=on_status, sleep=lambda s: None))
+    server.store.add_key("openai", "OpenAI", "sk-test-1234567890", model="gpt-4o-mini")      # one AI key so screening is allowed
+    monkeypatch.setattr(server, "make_llm", lambda on_status: LLM([candidate()], on_status=on_status, sleep=lambda s: None,
+                                                                  http=fake_http([router(assess=assessment(8))] * 12)))
     monkeypatch.setattr(server, "RUN_KW", {"crawl_fn": fake_crawl(), "search_fn": fake_search()})
     server.JOBS.clear()
     c = TestClient(server.app)
@@ -45,7 +48,7 @@ def wait_job(c, job_id):
 def test_page_and_health(client):
     assert "Deal Screening" in client.get("/").text
     h = client.get("/api/health").json()
-    assert h["key"] is True and h["profiles_error"] is None and h["theses"] == 1
+    assert h["key"] is True and h["ai"] == "OpenAI" and h["profiles_error"] is None and h["theses"] == 1
 
 
 def test_full_screening_history_memo_rescore_delete(client):
@@ -94,7 +97,9 @@ def test_deck_and_website_are_both_required(client):
 
 def test_a_fund_thesis_is_required_and_recorded_with_the_report(client, tmp_path, monkeypatch):
     real = server.store
-    monkeypatch.setattr(server, "store", Store(tmp_path / "empty.db"))          # a fresh install: no theses at all
+    fresh = Store(tmp_path / "empty.db")                                         # a fresh install: an AI key but no theses at all
+    fresh.add_key("openai", "OpenAI", "sk-test-1234567890", model="gpt-4o-mini")
+    monkeypatch.setattr(server, "store", fresh)
     assert "Create a fund thesis first" in screen(client, data={"website": "acme.test", "thesis_id": "1"}).json()["detail"]
     monkeypatch.setattr(server, "store", real)
     assert "Choose a fund thesis" in screen(client, data={"website": "acme.test"}).json()["detail"]
@@ -166,9 +171,10 @@ def test_scanned_deck_reports_a_readable_error(client):
     assert job["status"] == "error" and "scanned" in job["error"]
 
 
-def test_missing_key_rejected_before_queueing(client, monkeypatch):
-    monkeypatch.delenv("GROQ_API_KEY")
-    assert "GROQ_API_KEY" in screen(client).json()["detail"]
+def test_an_ai_key_is_required_before_queueing(client):
+    for k in server.store.list_keys():
+        server.store.delete_key(k["id"])
+    assert "AI key" in screen(client).json()["detail"] and client.get("/api/health").json()["key"] is False
 
 
 def test_non_ascii_company_memo_downloads(client):
@@ -191,3 +197,112 @@ def test_queued_jobs_are_never_pruned(client):
 def test_writes_need_header_and_localhost(client):
     assert client.post("/api/screen", data={"website": "x.com"}).status_code == 403
     assert client.get("/api/health", headers={"host": "evil.example.com"}).status_code == 403
+
+
+# ---------- AI keys ----------
+def serve_models(request):
+    """A fake OpenAI: lists models, answers chat; the key 'sk-bad...' is rejected."""
+    if "sk-bad" in request.headers.get("authorization", ""):
+        return httpx.Response(401, json={"error": {"message": "Incorrect API key provided"}})
+    if request.method == "GET":
+        return httpx.Response(200, json={"data": [{"id": "gpt-4o-mini"}, {"id": "gpt-5-mini"}]})
+    return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+
+@pytest.fixture()
+def keys_client(client, monkeypatch):
+    monkeypatch.setattr(server, "HTTP", httpx.Client(transport=httpx.MockTransport(serve_models)))
+    for k in server.store.list_keys():
+        server.store.delete_key(k["id"])
+    return client
+
+
+def test_adding_a_key_tests_it_first_and_never_returns_it(keys_client):
+    c = keys_client
+    r = c.post("/api/llm-keys", json={"provider": "openai", "api_key": "sk-good-abcdef123456"}, headers=H)
+    assert r.status_code == 200 and "sk-good" not in r.text
+    row = r.json()["key"]
+    assert row["model"] == "gpt-5-mini" and row["key_hint"] == "…3456" and row["status"] == "ready" and row["source"] == "app"   # best model found automatically
+    assert r.json()["ready"] is True and c.get("/api/health").json()["key"] is True
+    assert "sk-good" not in c.get("/api/llm-keys").text
+    bad = c.post("/api/llm-keys", json={"provider": "openai", "api_key": "sk-bad-abcdef123456"}, headers=H)
+    assert bad.status_code == 400 and "rejected" in bad.json()["detail"] and bad.json()["can_save_anyway"] is False
+    assert len(c.get("/api/llm-keys").json()["keys"]) == 1                                       # the bad key was not saved
+
+
+def test_key_form_errors_are_readable(keys_client):
+    c = keys_client
+    post = lambda **b: c.post("/api/llm-keys", json=b, headers=H)  # noqa: E731
+    assert "Choose a provider" in post(provider="x", api_key="k" * 20).json()["detail"]
+    assert "too short" in post(provider="openai", api_key="abc").json()["detail"]
+    assert "needs a model" in post(provider="openrouter", api_key="sk-or-" + "x" * 20).json()["detail"]
+    assert "base URL" in post(provider="custom", api_key="k" * 20, model="m", base_url="nope").json()["detail"]
+    assert c.get("/api/llm-keys").json()["providers"][0]["id"] == "anthropic" and len(c.get("/api/llm-keys").json()["providers"]) == 6
+
+
+def test_several_keys_can_be_ordered_switched_off_and_removed(keys_client):
+    c = keys_client
+    ids = [c.post("/api/llm-keys", json={"provider": "openai", "api_key": f"sk-key-{i}-abcdef123456", "label": f"Key {i}", "skip_test": True}, headers=H).json()["key"]["id"]
+           for i in (1, 2, 3)]
+    order = lambda: [k["label"] for k in c.get("/api/llm-keys").json()["keys"]]  # noqa: E731
+    assert order() == ["Key 1", "Key 2", "Key 3"]
+    c.put(f"/api/llm-keys/{ids[2]}", json={"move": "up"}, headers=H)
+    assert order() == ["Key 1", "Key 3", "Key 2"]
+    c.put(f"/api/llm-keys/{ids[0]}", json={"move": "down"}, headers=H)
+    assert order() == ["Key 3", "Key 1", "Key 2"]
+    off = c.put(f"/api/llm-keys/{ids[0]}", json={"enabled": False}, headers=H).json()
+    assert next(k for k in off["keys"] if k["id"] == ids[0])["status"] == "disabled"
+    assert [x.key_id for x in server.all_candidates(server.store)] == [ids[2], ids[1]]              # the disabled key is not used, order kept
+    assert c.delete(f"/api/llm-keys/{ids[1]}", headers=H).status_code == 200 and len(c.get("/api/llm-keys").json()["keys"]) == 2
+    assert c.put("/api/llm-keys/999", json={"enabled": True}, headers=H).status_code == 404 and c.delete("/api/llm-keys/999", headers=H).status_code == 404
+    assert c.put(f"/api/llm-keys/{ids[0]}", json={"move": "sideways"}, headers=H).status_code == 400
+
+
+def test_environment_keys_appear_and_cannot_be_deleted(keys_client, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-1234567890")
+    keys = keys_client.get("/api/llm-keys").json()["keys"]
+    env = next(k for k in keys if k["source"] == "env")
+    assert env["provider"] == "anthropic" and env["key_hint"] == "…7890" and env["env_names"] == ["ANTHROPIC_API_KEY"] and "sk-ant-env" not in str(keys)
+    gone = keys_client.delete(f"/api/llm-keys/{env['id']}", headers=H)
+    assert gone.status_code == 400 and "ANTHROPIC_API_KEY" in gone.json()["detail"]
+    assert keys_client.put(f"/api/llm-keys/{env['id']}", json={"enabled": False}, headers=H).status_code == 200
+
+
+def test_testing_a_saved_key_clears_its_cooldown(keys_client):
+    c = keys_client
+    kid = c.post("/api/llm-keys", json={"provider": "openai", "api_key": "sk-good-abcdef123456"}, headers=H).json()["key"]["id"]
+    for cand in server.candidates_for(server.store.get_key(kid)):
+        server.HEALTH.mark(cand, "rate", 300)
+    assert c.get("/api/llm-keys").json()["keys"][0]["status"] == "cooling"
+    result = c.post(f"/api/llm-keys/{kid}/test", headers=H).json()
+    assert result["ok"] is True and c.get("/api/llm-keys").json()["keys"][0]["status"] == "ready"
+
+
+def test_key_endpoints_need_the_header_like_every_write(keys_client):
+    assert keys_client.post("/api/llm-keys", json={"provider": "openai", "api_key": "k" * 20}).status_code == 403
+
+
+# ---------- hosted mode: APP_PASSWORD ----------
+def test_password_protects_everything_when_set(client, monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "correct-horse-battery")
+    hosted = {"host": "screening.example.com"}                                  # not localhost: allowed only because a password is set
+    assert client.get("/api/runs", headers=hosted).status_code == 401
+    assert client.get("/", headers=hosted, follow_redirects=False).headers["location"] == "/login"
+    assert client.get("/login", headers=hosted).status_code == 200 and "Password" in client.get("/login", headers=hosted).text
+    assert client.post("/api/login", json={"password": "nope"}, headers={**H, **hosted}).status_code == 401
+    ok = client.post("/api/login", json={"password": "correct-horse-battery"}, headers={**H, **hosted})
+    assert ok.status_code == 200 and "httponly" in ok.headers["set-cookie"].lower()
+    assert client.get("/api/runs", headers=hosted).status_code == 200                # the cookie is now sent by the client
+    client.cookies.set("session", "9999999999.forged")
+    assert client.get("/api/runs", headers=hosted).status_code == 401                # a forged cookie is refused
+
+
+def test_login_is_rate_limited_and_local_mode_has_no_login(client, monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "correct-horse-battery")
+    server.FAILS.clear()
+    codes = [client.post("/api/login", json={"password": "x"}, headers=H).status_code for _ in range(7)]
+    assert codes[:5] == [401] * 5 and codes[5:] == [429, 429]
+    assert client.post("/api/login", json={"password": "correct-horse-battery"}, headers=H).status_code == 429   # even the right one waits
+    server.FAILS.clear()
+    monkeypatch.delenv("APP_PASSWORD")
+    assert client.get("/api/runs").status_code == 200 and client.get("/api/runs", headers={"host": "evil.example"}).status_code == 403

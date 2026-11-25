@@ -343,3 +343,11 @@ th[aria-sort="descending"] .sortbtn::after { content: "↓"; opacity: 1; }
   body { background: #fff; } .report { display: block; }
   .detail { display: table-row !important; }
 }
+
+/* AI keys */
+.keys { list-style: none; margin: 0 0 var(--s4); padding: 0; }
+.key-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s3); align-items: center; margin-bottom: var(--s3); }
+.key-row__main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.key-row__actions { display: flex; gap: var(--s2); flex-wrap: wrap; }
+.key-row [data-result] { flex-basis: 100%; margin: 0; }
+.key-pill { text-decoration: none; }

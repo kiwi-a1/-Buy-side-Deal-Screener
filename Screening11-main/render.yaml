@@ -1,0 +1,17 @@
+# Render Blueprint for this repo (project lives in Screening11-main/).
+services:
+  - type: web
+    name: deal-screening
+    runtime: docker
+    rootDir: Screening11-main
+    plan: starter            # a persistent disk needs a paid plan; free plans lose the database on every restart
+    autoDeployTrigger: commit
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: APP_PASSWORD
+        sync: false          # you type it in the Render dashboard; it is never stored in the repo
+      - key: GROQ_API_KEY
+        sync: false          # optional: or add keys later on the app's AI keys page

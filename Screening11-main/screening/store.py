@@ -28,6 +28,11 @@ class Store:
             db.execute("""CREATE TABLE IF NOT EXISTS runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, created TEXT NOT NULL, company TEXT, source TEXT,
                 overall REAL, decision TEXT, fit TEXT, result TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS llm_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, label TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
+                base_url TEXT NOT NULL DEFAULT '', api_key TEXT, source TEXT NOT NULL DEFAULT 'app', enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL, created TEXT NOT NULL)""")
+            db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("""CREATE TABLE IF NOT EXISTS theses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE, data TEXT NOT NULL,
                 created TEXT NOT NULL, updated TEXT NOT NULL)""")
@@ -49,6 +54,63 @@ class Store:
     def list(self, limit: int = 300) -> list[dict]:
         with self._db() as db:
             return [dict(r) for r in db.execute(_LIST, (limit,)).fetchall()]
+
+    # ---------- AI keys ----------
+    def list_keys(self) -> list[dict]:
+        with self._db() as db:
+            return [dict(r) for r in db.execute("SELECT * FROM llm_keys ORDER BY priority, id").fetchall()]
+
+    def get_key(self, key_id: int) -> dict | None:
+        with self._db() as db:
+            r = db.execute("SELECT * FROM llm_keys WHERE id = ?", (key_id,)).fetchone()
+        return dict(r) if r else None
+
+    def add_key(self, provider: str, label: str, api_key: str | None, model: str = "", base_url: str = "", source: str = "app",
+                priority: int | None = None) -> int:
+        with self._db() as db:
+            if priority is None:
+                priority = (db.execute("SELECT MAX(priority) FROM llm_keys WHERE source = 'app'").fetchone()[0] or 1000) + 10
+            return int(db.execute("INSERT INTO llm_keys (provider, label, model, base_url, api_key, source, enabled, priority, created) "
+                                  "VALUES (?,?,?,?,?,?,1,?,?)", (provider, label, model, base_url, api_key, source, priority,
+                                  datetime.now(timezone.utc).isoformat(timespec="seconds"))).lastrowid)
+
+    def update_key(self, key_id: int, **fields) -> bool:
+        allowed = {"label", "model", "base_url", "api_key", "enabled", "priority"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return self.get_key(key_id) is not None
+        with self._db() as db:
+            return db.execute(f"UPDATE llm_keys SET {', '.join(k + ' = ?' for k in sets)} WHERE id = ?", (*sets.values(), key_id)).rowcount > 0
+
+    def delete_key(self, key_id: int) -> bool:
+        with self._db() as db:
+            return db.execute("DELETE FROM llm_keys WHERE id = ?", (key_id,)).rowcount > 0
+
+    def move_key(self, key_id: int, direction: str) -> bool:
+        """Swap priority with the neighbour above/below."""
+        rows = self.list_keys()
+        i = next((n for n, r in enumerate(rows) if r["id"] == key_id), None)
+        j = None if i is None else (i - 1 if direction == "up" else i + 1)
+        if i is None or j is None or not 0 <= j < len(rows):
+            return False
+        a, b = rows[i], rows[j]
+        if a["priority"] == b["priority"]:                      # keep priorities distinct so the order is stable
+            with self._db() as db:
+                for n, r in enumerate(rows):
+                    db.execute("UPDATE llm_keys SET priority = ? WHERE id = ?", (n * 10, r["id"]))
+            a, b = self.get_key(a["id"]), self.get_key(b["id"])
+        self.update_key(a["id"], priority=b["priority"])
+        self.update_key(b["id"], priority=a["priority"])
+        return True
+
+    def get_setting(self, key: str) -> str | None:
+        with self._db() as db:
+            r = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return r["value"] if r else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._db() as db:
+            db.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
     # ---------- fund theses ----------
     def list_theses(self) -> list[dict]:

@@ -6,19 +6,25 @@ company's **pitch deck (PDF)** and **website** (both required) plus any extra fi
 model, and produces a report with an **ADVANCE / MAYBE / PASS** decision, red flags and founder questions. Download it as a
 formal **PDF memorandum**.
 
-Free to run: the AI is [Groq](https://console.groq.com)'s free tier and web search needs no key. Everything is stored
-on your computer.
+Free to run: use [Groq](https://console.groq.com)'s free tier, or any AI you already pay for. Web search needs no key.
+Everything is stored where the app runs (your computer, or your own server).
+
+**Bring any AI key, or several.** Anthropic, OpenAI, Gemini, OpenRouter, Groq, or any OpenAI-compatible service (Mistral,
+Together, DeepSeek, a local Ollama...). Add keys on the **AI keys** page (each is tested before it is saved) or in `.env`.
+They are used in the order listed. If one is slow (over 60 s), rate-limited, out of credit, rejected or down, the app moves
+to the next one in the middle of a screening, pauses the failed key for a while, and the report says which AI answered and
+when it switched.
 
 ## Run it
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # paste your free Groq key after GROQ_API_KEY=
+cp .env.example .env        # optional: paste a key there, or add it later on the app's AI keys page
 python app.py               # then open http://localhost:8501
 ```
 
-On first start there is no fund thesis, so the app asks you to create one before anything can be screened. You can keep
+On first start the app asks for an AI key (if none is set) and then for a fund thesis, so the app asks you to create one before anything can be screened. You can keep
 several (e.g. a seed fund and a Series A fund) and pick which one each company is compared against.
 
 Tests (offline, no key needed): `python -m pytest -q`
@@ -70,7 +76,7 @@ Code, not the AI, makes this comparison, and every row in the report shows what 
 
 ## Limits - read these
 
-- **Free-tier speed:** Groq's free tier allows ~8,000 tokens/minute, so the 4 AI calls are paced (~1 minute apart).
+- **Free-tier speed:** Groq's free tier allows ~8,000 tokens/minute, so with Groq as the first key the 4 AI calls are paced (~1 minute apart). Paid providers are not paced and read more text per call.
 - **Depth limits:** about 16,000 characters of documents and ~7 website pages are analysed in depth per run; up to 16
   key claims are verified. The report says when anything was cut.
 - **Verification is only as good as public evidence.** Search snippets often do not state specific numbers, so many
@@ -83,21 +89,24 @@ Code, not the AI, makes this comparison, and every row in the report shows what 
 - **Crawler safety:** only public addresses are fetched, including after redirects. One known gap: the hostname is
   checked and then looked up again by the HTTP library, so a hostile site with rigged DNS could in theory point at a
   private address in between. Don't screen websites you consider hostile on a machine with sensitive local services.
-- **Privacy:** documents and website text go to Groq; search queries go to a public search engine.
+- **Privacy:** documents and website text go to the AI provider(s) you configured; search queries go to a public search engine.
+- **Provider support:** Groq was tested live, including automatic failover from a rejected OpenAI key. The Anthropic, Gemini and OpenRouter connections follow the providers' documented formats and are tested against simulated servers only; use *Test* on the AI keys page to confirm yours.
 - The AI classifies the business model; if it picks the wrong type the weighting follows it (shown in the report).
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `app.py` | local web server (FastAPI) + JSON API; only answers on localhost |
+| `app.py` | web server (FastAPI) + JSON API; localhost only, or password-protected when `APP_PASSWORD` is set |
+| `Dockerfile`, `render.yaml`, `DEPLOY.md` | private hosted copy (see DEPLOY.md) |
 | `static/` | the web UI: `index.html`, `style.css`, `app.js`, `thesis.js` (no build step) |
 | `screening/pipeline.py` | the 6-step pipeline |
 | `screening/crawler.py` / `websearch.py` | website crawl / web search with source classification |
 | `screening/verify.py` | evidence rules, quote checks, cross-source consistency checks |
 | `screening/scoring.py` | dynamic weights, penalties, confidence, mandate fit, decision |
-| `screening/models.py` / `prompts.py` / `llm.py` | AI output validation / prompts / Groq client with pacing, retries, fallback |
+| `screening/models.py` / `prompts.py` / `llm.py` | AI output validation / prompts / AI engine with failover across keys |
+| `screening/providers.py` / `keys.py` | one adapter per AI API (OpenAI-style, Anthropic, Gemini) / key storage, testing and ordering |
 | `screening/intake.py` / `report.py` / `store.py` | document parsing / Markdown memo / local SQLite (history and fund theses; `SCREENING_DB` changes its location) |
 | `screening/suggestions.py` / `thesis.py` | thesis-editor suggestions and text readers (countries, stages, sectors) / thesis model and self-checks |
 | `screening/pdf.py` + `assets/fonts/` | the PDF memorandum template (Roboto and Source Serif fonts, licences included) |
-| `tests/` | offline tests with fake Groq, crawl and search |
+| `tests/` | offline tests with fake AI servers, crawl and search |

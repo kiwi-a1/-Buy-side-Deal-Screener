@@ -59,11 +59,12 @@ def _pick_pages(pages: list, budget: int) -> list[dict]:
     """Homepage first, then the most relevant pages, each trimmed so several pages fit in one call."""
     ordered = sorted(pages, key=lambda p: (p.depth != 0, -p.priority, p.depth))
     picked, used = [], 0
+    per_page = max(2800, budget // 10)       # a provider with room to spare reads each page more fully
     for p in ordered:
         room = budget - used
         if room < 600:
             break
-        body = p.text[:min(2800, room)]
+        body = p.text[:min(per_page, room)]
         picked.append({"id": f"P{len(picked) + 1}", "url": p.url, "title": p.title, "text": body})
         used += len(body) + 120
     return picked
@@ -151,7 +152,7 @@ def analyse(inp: Inputs, llm: LLM, thesis, prof: dict, step: Callable[[str, str,
                       "the most relevant pages were chosen.")
             pblock = "\n\n".join(f"=== {p['id']}: {p['url']} ({p['title']}) ===\n{p['text']}" for p in pages)
             try:
-                site_ex = llm.json(sys2, f"<UNTRUSTED>\n{pblock}\n</UNTRUSTED>", Extraction, max_tokens=2200, max_models=2)
+                site_ex = llm.json(sys2, f"<UNTRUSTED>\n{pblock}\n</UNTRUSTED>", Extraction, max_tokens=2200, max_providers=2)
                 site_p, site_claims_raw = site_ex.profile, site_ex.claims
             except LLMError as e:
                 issue("extract", "error", f"Website extraction failed ({e}); continuing with the documents only.")
@@ -233,7 +234,7 @@ def analyse(inp: Inputs, llm: LLM, thesis, prof: dict, step: Callable[[str, str,
         user = (f"Today's date: {date.today().isoformat()}\nCLAIMS TO CHECK, with likely evidence:\n{cand_lines}\n\n<UNTRUSTED>\n"
                 f"COMPANY CLAIMS (C ids):\n{claim_lines}\n\nWEB SEARCH RESULTS (S ids):\n{chr(10).join(hit_lines) or '(none)'}\n</UNTRUSTED>")
         try:  # medium reasoning: comparing numbers and dates across sources is where accuracy matters most
-            checks = llm.json(prompts.VERIFY_SYSTEM, user, Verification, max_tokens=3000, max_models=2, reasoning="medium").checks
+            checks = llm.json(prompts.VERIFY_SYSTEM, user, Verification, max_tokens=3000, max_providers=2, reasoning="medium").checks
         except LLMError as e:
             checks = []
             issue("verify", "error", f"The verification step failed ({e}); claims are shown as unverified.")
@@ -286,6 +287,12 @@ def analyse(inp: Inputs, llm: LLM, thesis, prof: dict, step: Callable[[str, str,
         dims[k].update(ev["scores"][k])
     checks = consistency_checks(deck_d, site_d, " ".join(p.text for p in cr.pages), site_ok, sr, group, prof["round_size_eur"])
     checks += number_mismatches(claims)
+    seen = set()
+    for e in llm.events:                                       # provider switches are part of the story: show each distinct one once
+        key = (e["from"], e["to"], e["reason"])
+        if key not in seen:
+            seen.add(key)
+            issue("ai", "info", f"{e['from']} {e['reason']}, so {e['to']} was used instead.")
     step("score", "done", f"{ev['decision']} - {ev['overall']}/10 ({ev['confidence']['level']} confidence)")
 
     return {
@@ -305,4 +312,5 @@ def analyse(inp: Inputs, llm: LLM, thesis, prof: dict, step: Callable[[str, str,
         "search": {"provider": sr.get("provider"), "queries": sr.get("queries", []), "failed": sr.get("failed", []),
                    "available": bool(sr.get("available")), "irrelevant": sr.get("irrelevant", 0), "hits": hits},
         "issues": issues, "model": llm.last_model, "llm_calls": llm.calls, "seconds": round(time.time() - t0, 1),
+        "llm": {"used": llm.used, "switches": llm.events},
     }

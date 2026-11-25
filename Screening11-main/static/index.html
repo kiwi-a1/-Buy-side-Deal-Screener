@@ -23,8 +23,9 @@
         <a class="nav__link" href="#/screen" data-nav="screen">New screening</a>
         <a class="nav__link" href="#/history" data-nav="history">History</a>
         <a class="nav__link" href="#/thesis" data-nav="thesis">Fund theses</a>
+        <a class="nav__link" href="#/keys" data-nav="keys">AI keys</a>
       </nav>
-      <span class="key-pill" id="key-pill" hidden></span>
+      <a class="key-pill" id="key-pill" href="#/keys" hidden></a>
     </div>
   </header>
 
@@ -37,10 +38,13 @@
         <p class="muted">The deck and the website are required. Everything is cross-checked against the website and the open web before scoring.</p>
       </div>
 
-      <div class="alert alert--danger" id="no-key" role="alert" hidden>
-        <strong>Add your free Groq key to start.</strong> Open <code>.env</code> in the project folder, paste your key after
-        <code>GROQ_API_KEY=</code>, save, and restart the app. Get a key at <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a>.
-      </div>
+      <section class="panel gate" id="no-key" aria-labelledby="nokey-title" hidden>
+        <p class="eyebrow">Before you start</p>
+        <h2 class="h2" id="nokey-title">Add an AI key first</h2>
+        <p class="muted">The analysis needs an AI service. Use any of Anthropic, OpenAI, Gemini, OpenRouter, Groq (free tier) or another OpenAI-compatible service.
+          Add more than one and the app switches to the next automatically when one is slow, rate-limited or out of credit.</p>
+        <div class="actions"><a class="btn btn--primary" href="#/keys">Add an AI key</a></div>
+      </section>
       <div class="alert alert--danger" id="profiles-error" role="alert" hidden></div>
 
       <section class="panel gate" id="thesis-gate" aria-labelledby="gate-title" hidden>
@@ -117,7 +121,7 @@
             <li><strong>Verify.</strong> A claim is only "verified" if an independent source confirms it.</li>
             <li><strong>Score.</strong> Weights adapt to stage and business model; contradictions lower the score; every adjustment is explained.</li>
           </ol>
-          <p class="help">Your documents and website text are sent to Groq for analysis and search queries go to a public search engine. Nothing is stored outside this computer.</p>
+          <p class="help">Your documents and website text are sent to your AI provider for analysis and search queries go to a public search engine. Results are stored only where this app runs.</p>
         </aside>
       </div>
 
@@ -156,6 +160,32 @@
       <div id="history-list"></div>
     </section>
 
+    <!-- AI KEYS -->
+    <section id="view-keys" class="view" aria-labelledby="keys-title" hidden>
+      <div class="page-head">
+        <p class="eyebrow">Settings</p>
+        <h1 id="keys-title">AI keys</h1>
+        <p class="muted">The app tries keys from the top. If one is slow, rate-limited, out of credit or fails, it moves to the next one and carries on. Add at least one.</p>
+      </div>
+      <div id="keys-list"></div>
+      <form id="key-form" class="panel" novalidate>
+        <h2 class="h3">Add a key</h2>
+        <div class="row2">
+          <div class="field"><label class="label" for="k-provider">Provider</label><select id="k-provider"></select></div>
+          <div class="field"><label class="label" for="k-label">Name <span class="optional">optional</span></label><input type="text" id="k-label" maxlength="60" autocomplete="off"></div>
+        </div>
+        <div class="field"><label class="label" for="k-key">API key</label><input type="password" id="k-key" autocomplete="off" spellcheck="false" aria-describedby="k-help">
+          <p class="help" id="k-help"></p></div>
+        <div class="row2">
+          <div class="field" id="k-model-f"><label class="label" for="k-model">Model <span class="optional" id="k-model-opt">optional</span></label><input type="text" id="k-model" autocomplete="off" spellcheck="false"></div>
+          <div class="field" id="k-base-f" hidden><label class="label" for="k-base">Base URL</label><input type="url" id="k-base" placeholder="https://api.example.com/v1" autocomplete="off"></div>
+        </div>
+        <p class="form-error" id="k-error" role="alert" hidden></p>
+        <div class="actions"><button type="submit" class="btn btn--primary" id="k-add">Test and save</button><button type="button" class="btn btn--ghost" id="k-force" hidden>Save anyway</button></div>
+        <p class="help">The key is checked with a tiny request first. It is stored in this app's database and never shown again (only its last 4 characters).</p>
+      </form>
+    </section>
+
     <!-- THESIS -->
     <section id="view-thesis" class="view" aria-labelledby="thesis-title" hidden>
       <div class="page-head page-head--row" id="thesis-head">
@@ -174,5 +204,6 @@
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <script src="/static/app.js"></script>
   <script src="/static/thesis.js"></script>
+  <script src="/static/keys.js"></script>
 </body>
 </html>

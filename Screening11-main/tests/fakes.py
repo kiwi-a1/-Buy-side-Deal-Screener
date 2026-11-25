@@ -1,9 +1,11 @@
-"""Shared test doubles: a fake Groq client, a fake crawl and a fake web search. No network, no cost."""
+"""Shared test doubles: a fake AI server (httpx mock transport), a fake crawl and a fake web search. No network, no cost."""
 import json
-from types import SimpleNamespace
+
+import httpx
 
 from screening.crawler import CrawlResult, Page
 from screening.llm import LLM
+from screening.providers import Candidate
 from screening.scoring import DIMENSIONS
 
 DECK_TEXT = ("Acme Robotics builds AI inspection robots for factories. Founded in 2021 in Warsaw, Poland. "
@@ -11,35 +13,59 @@ DECK_TEXT = ("Acme Robotics builds AI inspection robots for factories. Founded i
              "Founders: Anna Nowak (CEO, ex-ABB) and Piotr Zielinski (CTO, PhD robotics). Raising EUR 3M seed.")
 
 
+class Reply:
+    def __init__(self, content, tokens=100):
+        self.content, self.tokens = content, tokens
+
+
 def reply(content, tokens=100):
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-                           usage=SimpleNamespace(total_tokens=tokens))
+    return Reply(content, tokens)
 
 
-class HttpError(Exception):
-    def __init__(self, status, headers=None):
-        super().__init__(f"http {status}")
-        self.status_code = status
-        self.response = SimpleNamespace(headers=headers or {})
+class HttpError:
+    """Scripted HTTP error response (status, headers, message)."""
+    def __init__(self, status, headers=None, message="error"):
+        self.status_code, self.headers, self.message = status, headers or {}, message
 
 
-class FakeClient:
-    """create() pops the next scripted item: a reply, an Exception to raise, or a function(kwargs)."""
-    def __init__(self, script):
-        self.script, self.calls = list(script), []
-        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+def candidate(i=1, tpm=None, kind="openai", model=None, base="https://ai.test/v1"):
+    return Candidate(provider="custom", label=f"AI-{i}", kind=kind, base_url=base, api_key=f"key-{i}-abcdefgh", model=model or f"model-{i}", key_id=i, tpm=tpm)
 
-    def _create(self, **kw):
-        self.calls.append(kw)
-        item = self.script.pop(0)
+
+def fake_http(script):
+    """An httpx client whose 'server' answers from `script`: each request pops the next item - a Reply (OpenAI format), an
+    HttpError, an exception to raise (e.g. httpx.ReadTimeout), or a function(kw) returning one of those."""
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content) if request.content else {}
+        kw = {"messages": body.get("messages", []), "model": body.get("model"), "url": str(request.url), "body": body,
+              "headers": dict(request.headers), "timeout": request.extensions.get("timeout")}
+        calls.append(kw)
+        item = script.pop(0)
+        if callable(item):
+            item = item(kw)
         if isinstance(item, Exception):
             raise item
-        return item(kw) if callable(item) else item
+        if isinstance(item, HttpError):
+            return httpx.Response(item.status_code, headers=item.headers, json={"error": {"message": item.message}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": item.content}}], "usage": {"total_tokens": item.tokens}})
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    client.calls = calls
+    return client
 
 
-def make_llm(script, **kw):
-    sleeps = []
-    return LLM(client=FakeClient(script), sleep=sleeps.append, **kw), sleeps
+def make_llm(script, n=1, tpm=None, **kw):
+    """n providers (AI-1 first) all served by one scripted fake server, with a fake clock that sleeping advances. Returns (llm, sleeps)."""
+    now, sleeps = [1000.0], []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+    http = fake_http(script)
+    llm = LLM([candidate(i + 1, tpm=tpm) for i in range(n)], http=http, sleep=sleep, clock=lambda: now[0], **kw)
+    llm.http_calls = http.calls
+    return llm, sleeps
 
 
 DECK_EX = {"profile": {"company_name": "Acme Robotics", "one_liner": "AI inspection robots for factories",

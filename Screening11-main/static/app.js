@@ -19,10 +19,13 @@ async function api(path, { method = "GET", body, form } = {}) {
   else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
   let res;
   try { res = await fetch(path, opts); } catch { throw new Error("The app's server is not responding. Is `python app.py` still running?"); }
+  if (res.status === 401 && !path.startsWith("/api/login")) { location.href = "/login"; throw new Error("Signing in..."); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const d = data.detail;
-    throw new Error(typeof d === "string" ? d : Array.isArray(d) ? d.map((x) => x.msg).join("; ") : `Request failed (${res.status})`);
+    const err = new Error(typeof d === "string" ? d : Array.isArray(d) ? d.map((x) => x.msg).join("; ") : `Request failed (${res.status})`);
+    err.can_save_anyway = !!data.can_save_anyway;
+    throw err;
   }
   return data;
 }
@@ -51,7 +54,7 @@ const PALETTE = ["#111111", "#FECE14", "#52525B", "#D97706", "#A1A1AA", "#16A34A
 const badge = (status) => `<span class="badge badge--${esc(status)}" title="${esc(STATUS[status]?.hint || "")}">${esc(STATUS[status]?.label || status)}</span>`;
 
 /* ---------- routing ---------- */
-const views = { screen: "#view-screen", history: "#view-history", thesis: "#view-thesis", run: "#view-run" };
+const views = { screen: "#view-screen", history: "#view-history", thesis: "#view-thesis", keys: "#view-keys", run: "#view-run" };
 let lastHash = location.hash || "#/screen";
 async function route() {
   const target = location.hash || "#/screen";
@@ -67,10 +70,11 @@ async function route() {
   for (const a of $$("[data-nav]")) {
     if (a.dataset.nav === (key === "run" ? "history" : key)) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   }
-  document.title = `${{ screen: "New screening", history: "History", thesis: "Fund theses", run: "Report" }[key]} · Deal Screening`;
+  document.title = `${{ screen: "New screening", history: "History", thesis: "Fund theses", keys: "AI keys", run: "Report" }[key]} · Deal Screening`;
   if (key === "screen") await refreshTheses();
   if (key === "history") await loadHistory();
   if (key === "thesis") await loadThesis(id);
+  if (key === "keys") await loadKeys();
   if (key === "run") await loadRun(Number(id));
   if (route.ready) { window.scrollTo(0, 0); const h = $(`${views[key]} h1`); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
   route.ready = true;
@@ -83,8 +87,9 @@ async function loadHealth() {
     const pill = $("#key-pill");
     pill.hidden = false;
     pill.className = `key-pill${h.key ? "" : " key-pill--missing"}`;
-    pill.textContent = h.key ? `Groq ready · ${h.search}` : "No Groq key";
+    pill.textContent = h.key ? `${h.ai}${h.ai_count > 1 ? ` +${h.ai_count - 1}` : ""} ready · ${h.search}` : "No AI key";
     $("#no-key").hidden = h.key;
+    if (!h.key) $("#screen-body").hidden = true;
     const pe = $("#profiles-error");
     pe.hidden = !h.profiles_error; pe.textContent = h.profiles_error || "";
     $("#go").disabled = !h.key || !!h.profiles_error;
@@ -424,7 +429,7 @@ async function loadRun(id) {
   view.innerHTML = `<div class="report"><nav class="toc" aria-label="Report sections"><ol>${SECTIONS.map(([id, label], i) =>
     `<li><a href="#sec-${id}" data-toc="${id}"><span>${esc(label)}</span><span class="num">${String(i + 1).padStart(2, "0")}</span></a></li>`).join("")}</ol></nav>
     <div>${head}<div class="rbody">${body}</div>
-    <p class="foot" style="margin-top:40px">Model ${esc(r.model)} · ${r.llm_calls} AI calls · ${fmt(r.seconds, 0)} s · inputs: ${esc(r.inputs.deck)}${r.inputs.resources.length ? ` + ${esc(r.inputs.resources.join(", "))}` : ""} · ${esc(r.inputs.website)}.
+    <p class="foot" style="margin-top:40px">Model ${esc(r.model)} · ${r.llm_calls} AI calls${(r.llm?.switches || []).length ? ` · switched provider ${r.llm.switches.length}× (${esc([...new Set(r.llm.switches.map((s) => `${s.from}: ${s.reason}`))].join("; "))})` : ""} · ${fmt(r.seconds, 0)} s · inputs: ${esc(r.inputs.deck)}${r.inputs.resources.length ? ` + ${esc(r.inputs.resources.join(", "))}` : ""} · ${esc(r.inputs.website)}.
       AI-assisted screening: claims marked anything other than "Verified" have not been independently confirmed.</p></div></div>`;
   bindReport(r);
 }

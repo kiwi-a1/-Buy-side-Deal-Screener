@@ -282,23 +282,254 @@ def test_search_classifies_filters_and_survives_failures():
     assert not down["available"] and down["hits"] == []
 
 
-# ---------- LLM client ----------
-def test_llm_retries_rate_limits_and_falls_back():
-    llm, sleeps = make_llm([HttpError(429, {"retry-after": "7"}), reply('{"summary": "hi"}')])
-    from pydantic import BaseModel
+# ---------- AI engine: failover across providers ----------
+from pydantic import BaseModel  # noqa: E402
 
-    class S(BaseModel):
-        summary: str
-    assert llm.json("s", "u", S).summary == "hi" and 7.0 in sleeps
-    llm, _ = make_llm([HttpError(404), reply('{"summary": "two"}')], models="m1,m2")
-    assert llm.json("s", "u", S).summary == "two" and llm.last_model == "m2"
-    llm, _ = make_llm([HttpError(401)], models="m1,m2")
-    with pytest.raises(LLMError, match="API key"):
+
+class S(BaseModel):
+    summary: str
+
+
+OK = lambda text="x": reply('{"summary": "%s"}' % text)  # noqa: E731
+
+
+def test_a_rate_limited_provider_is_skipped_and_stays_skipped():
+    llm, sleeps = make_llm([HttpError(429, {"retry-after": "30"}), OK("from B"), OK("B again")], n=2)
+    assert llm.json("s", "u", S).summary == "from B"
+    assert llm.last_model == "AI-2 / model-2" and llm.events[0]["from"] == "AI-1 / model-1" and llm.events[0]["reason"] == "rate limited"
+    assert llm.json("s", "u", S).summary == "B again"
+    assert [c["model"] for c in llm.http_calls] == ["model-1", "model-2", "model-2"]          # the second call did not even try A
+    assert llm.health.status(llm.candidates[0]) == {"cooling": True, "reason": "rate", "seconds": 30} and sleeps == []
+
+
+@pytest.mark.parametrize("failure,why", [(HttpError(401), "key was rejected"), (HttpError(402), "out of quota"), (HttpError(500), "server error"),
+                                          (HttpError(529), "server error"), (HttpError(404), "not available"),
+                                          (httpx.ReadTimeout("slow"), "too slow"), (httpx.ConnectError("down"), "could not be reached"),
+                                          (RuntimeError("bug in a transport"), "unexpected error"),
+                                          (HttpError(400, message="You exceeded your current quota"), "out of quota")])
+def test_every_kind_of_failure_fails_over(failure, why):
+    llm, _ = make_llm([failure, OK("B")], n=2)
+    assert llm.json("s", "u", S).summary == "B" and why in llm.events[0]["reason"]
+
+
+def test_a_slow_provider_gets_a_shorter_timeout_only_while_a_fallback_exists():
+    llm, _ = make_llm([OK(), OK()], n=2, timeout=100, soft_timeout=40)
+    llm.json("s", "u", S)
+    assert llm.http_calls[0]["timeout"]["read"] == 40                                          # AI-1 has AI-2 behind it
+    llm2, _ = make_llm([HttpError(500), OK()], n=2, timeout=100, soft_timeout=40)
+    llm2.json("s", "u", S)
+    assert [c["timeout"]["read"] for c in llm2.http_calls] == [40, 100]                        # the last provider left gets the full time
+
+
+def test_when_everything_is_rate_limited_it_waits_once_then_succeeds():
+    llm, sleeps = make_llm([HttpError(429, {"retry-after": "7"}), OK("hi")])
+    assert llm.json("s", "u", S).summary == "hi" and sleeps == [7.5]
+    assert llm.health.status(llm.candidates[0])["cooling"] is False
+
+
+def test_when_nothing_can_answer_the_error_names_every_provider():
+    llm, _ = make_llm([HttpError(401), HttpError(429, {"retry-after": "500"})], n=2)
+    with pytest.raises(LLMError) as e:
         llm.json("s", "u", S)
-    llm, sleeps = make_llm([TypeError("bad kwarg"), reply('{"summary": "ok"}')], models="m1,m2")
-    assert llm.json("s", "u", S).summary == "ok" and sleeps == []                     # audit: bugs are not retried
-    llm, _ = make_llm([reply("not json"), reply('{"summary": "fixed"}')])
-    assert llm.json("s", "u", S).summary == "fixed"
+    msg = str(e.value)
+    assert "No AI provider could answer" in msg and "AI-1 / model-1: the API key was rejected" in msg and "AI-2 / model-2: rate limited" in msg
+
+
+def test_an_invalid_reply_is_repaired_once_then_the_next_provider_is_used():
+    llm, _ = make_llm([reply("not json"), OK("fixed")])
+    assert llm.json("s", "u", S).summary == "fixed" and "invalid" in llm.http_calls[1]["messages"][-1]["content"]
+    llm, _ = make_llm([reply("nope"), reply("still nope"), OK("B")], n=2)
+    assert llm.json("s", "u", S).summary == "B" and llm.events[0]["reason"] == "returned an invalid answer"
+
+
+def test_optional_steps_can_limit_how_many_providers_they_try():
+    llm, sleeps = make_llm([HttpError(500), HttpError(500), OK()], n=3)
+    with pytest.raises(LLMError):
+        llm.json("s", "u", S, max_providers=2)
+    assert len(llm.http_calls) == 2 and sleeps == []                                            # and server errors are not waited out
+
+
+def test_a_provider_comes_back_after_its_cooldown():
+    llm, sleeps = make_llm([HttpError(500), OK("B"), OK("B2"), OK("A is back")], n=2)
+    llm.json("s", "u", S)
+    llm.json("s", "u", S)
+    assert llm.http_calls[-1]["model"] == "model-2"
+    llm.sleep(100)                                                                              # the server-error cooldown (90s) passes
+    assert llm.json("s", "u", S).summary == "A is back" and llm.http_calls[-1]["model"] == "model-1"
+
+
+def test_budget_depends_on_the_first_providers_limits():
+    assert make_llm([], tpm=8000)[0].budget_chars(1800, 2200) < 17_000                       # a tight free tier
+    assert make_llm([], tpm=None)[0].budget_chars(1800, 2200) > 40_000                       # a normal paid key reads much more
+    llm, _ = make_llm([HttpError(429, {"retry-after": "60"}), OK()], n=2)
+    llm.candidates[0].tpm = 8000
+    llm.json("s", "u", S)
+    assert llm.budget_chars(1800, 2200) > 40_000                                               # primary moved on to the provider without a limit
+
+
+def test_pacing_only_applies_to_providers_with_a_token_limit():
+    llm, sleeps = make_llm([reply('{"summary": "x"}', tokens=900), OK()], tpm=1000)
+    llm.json("s", "u", S, max_tokens=800)
+    llm.json("s", "u", S, max_tokens=800)
+    assert sleeps and sleeps[0] > 0                                                              # the second call had to wait for the window
+    llm, sleeps = make_llm([OK(), OK()], tpm=None)
+    llm.json("s", "u", S, max_tokens=800)
+    llm.json("s", "u", S, max_tokens=800)
+    assert sleeps == []
+
+
+def test_no_keys_gives_a_clear_message():
+    from screening.llm import LLM
+    with pytest.raises(LLMError, match="AI keys"):
+        LLM([])
+
+
+# ---------- each vendor's wire format ----------
+import json as _json  # noqa: E402
+from screening import keys as K, providers as PR  # noqa: E402
+
+
+def one_shot(cand, handler):
+    seen = {}
+
+    def h(request):
+        seen.update(url=str(request.url), headers=dict(request.headers), body=_json.loads(request.content) if request.content else None, method=request.method)
+        return handler(request)
+    return PR.complete(httpx.Client(transport=httpx.MockTransport(h)), cand, "SYS", [{"role": "user", "content": "hi"}], 500, "low", 30.0), seen
+
+
+def test_openai_format_and_reasoning_models():
+    c = PR.Candidate("openai", "OpenAI", "openai", "https://api.openai.com/v1", "sk-test", "gpt-4o-mini")
+    (text, tokens), seen = one_shot(c, lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}], "usage": {"total_tokens": 42}}))
+    assert (text, tokens) == ("{}", 42) and seen["url"] == "https://api.openai.com/v1/chat/completions" and seen["headers"]["authorization"] == "Bearer sk-test"
+    assert seen["body"]["messages"][0] == {"role": "system", "content": "SYS"} and seen["body"]["max_completion_tokens"] == 500 and seen["body"]["temperature"] == 0.1
+    assert seen["body"]["response_format"] == {"type": "json_object"} and "reasoning_effort" not in seen["body"]
+    _, seen = one_shot(PR.Candidate("openai", "OpenAI", "openai", "https://api.openai.com/v1", "k", "gpt-5-mini"),
+                       lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]}))
+    assert "temperature" not in seen["body"] and seen["body"]["reasoning_effort"] == "low"      # reasoning models take no temperature
+
+
+def test_openai_compatible_services_use_max_tokens_and_openrouter_headers():
+    c = PR.Candidate("openrouter", "OpenRouter", "openai", "https://openrouter.ai/api/v1", "sk-or", "openai/gpt-4o-mini")
+    _, seen = one_shot(c, lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]}))
+    assert seen["body"]["max_tokens"] == 500 and "max_completion_tokens" not in seen["body"] and seen["headers"]["x-title"] == "Deal Screening"
+
+
+def test_parameters_a_model_rejects_are_dropped_and_retried():
+    calls = []
+
+    def h(request):
+        body = _json.loads(request.content)
+        calls.append(sorted(body))
+        if "temperature" in body:
+            return httpx.Response(400, json={"error": {"message": "Unsupported value: 'temperature' does not support 0.1 with this model"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+    (text, _), _ = one_shot(PR.Candidate("custom", "X", "openai", "https://x.test/v1", "k" * 8, "m"), h)
+    assert text == "{}" and "temperature" in calls[0] and "temperature" not in calls[1]
+
+
+def test_anthropic_format():
+    c = PR.Candidate("anthropic", "Anthropic", "anthropic", "https://api.anthropic.com", "sk-ant-x", "claude-sonnet-5-5")
+    resp = {"content": [{"type": "text", "text": '{"a": '}, {"type": "text", "text": "1}"}], "usage": {"input_tokens": 10, "output_tokens": 5}}
+    (text, tokens), seen = one_shot(c, lambda r: httpx.Response(200, json=resp))
+    assert (text, tokens) == ('{"a": 1}', 15) and seen["url"] == "https://api.anthropic.com/v1/messages"
+    assert seen["headers"]["x-api-key"] == "sk-ant-x" and seen["headers"]["anthropic-version"] == "2023-06-01"
+    assert seen["body"]["system"] == "SYS" and seen["body"]["messages"] == [{"role": "user", "content": "hi"}] and seen["body"]["max_tokens"] == 500
+
+
+def test_gemini_format():
+    c = PR.Candidate("gemini", "Gemini", "gemini", "https://generativelanguage.googleapis.com/v1beta", "AIza-test", "gemini-2.0-flash")
+    resp = {"candidates": [{"content": {"parts": [{"text": "hidden", "thought": True}, {"text": '{"a": 1}'}]}}], "usageMetadata": {"totalTokenCount": 77}}
+    (text, tokens), seen = one_shot(c, lambda r: httpx.Response(200, json=resp))
+    assert (text, tokens) == ('{"a": 1}', 77) and seen["url"].endswith("/models/gemini-2.0-flash:generateContent") and seen["headers"]["x-goog-api-key"] == "AIza-test"
+    assert seen["body"]["systemInstruction"]["parts"][0]["text"] == "SYS" and seen["body"]["generationConfig"]["responseMimeType"] == "application/json"
+    assert seen["body"]["contents"] == [{"role": "user", "parts": [{"text": "hi"}]}]
+    with pytest.raises(PR.ProviderError, match="blocked|SAFETY"):
+        one_shot(c, lambda r: httpx.Response(200, json={"candidates": [], "promptFeedback": {"blockReason": "SAFETY"}}))
+
+
+def test_errors_are_classified_whichever_vendor_sent_them():
+    cls = lambda status, body, headers=None: PR.error_from_response(httpx.Response(status, json=body, headers=headers or {}))  # noqa: E731
+    assert cls(401, {"error": {"message": "bad key"}}).kind == "auth" and cls(403, {}).kind == "auth"
+    assert cls(429, {"error": {"message": "slow down"}}, {"retry-after": "12"}).retry_after == 12
+    assert cls(429, {"error": {"type": "insufficient_quota", "message": "You exceeded your current quota, check billing"}}).kind == "quota"
+    assert cls(400, {"error": {"message": "Your credit balance is too low"}}).kind == "quota"
+    assert cls(529, {"error": {"message": "Overloaded"}}).kind == "server" and cls(404, {}).kind == "not_found" and cls(400, {}).kind == "bad_request"
+    assert cls(400, [{"error": {"message": "x"}}]).kind == "bad_request"                        # Gemini sometimes wraps errors in a list
+
+
+def test_model_discovery_picks_the_best_available_model():
+    models = {"openai": ["gpt-4o", "gpt-4o-mini", "gpt-5-mini", "gpt-5.1-mini", "text-embedding-3-small", "gpt-4o-audio-preview", "dall-e-3", "whisper-1"],
+              "anthropic": ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"], "gemini": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]}
+    assert PR.pick_model("openai", models["openai"]) == "gpt-5.1-mini" and PR.pick_model("anthropic", models["anthropic"]) == "claude-sonnet-5-5"
+    assert PR.pick_model("gemini", models["gemini"]) == "gemini-2.5-flash" and PR.pick_model("anthropic", ["something-else"]) == "claude-sonnet-5-5"
+
+    def serve(r):
+        if "anthropic" in str(r.url):
+            return httpx.Response(200, json={"data": [{"id": i} for i in models["anthropic"]]})
+        if "googleapis" in str(r.url):
+            return httpx.Response(200, json={"models": [{"name": "models/" + i, "supportedGenerationMethods": ["generateContent"]} for i in models["gemini"]]
+                                             + [{"name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"]}]})
+        return httpx.Response(200, json={"data": [{"id": i} for i in models["openai"]]})
+    http = httpx.Client(transport=httpx.MockTransport(serve))
+    assert sorted(PR.list_models(http, PR.Candidate("openai", "O", "openai", "https://api.openai.com/v1", "k", "m"))) == ["gpt-4o", "gpt-4o-mini", "gpt-5-mini", "gpt-5.1-mini"]
+    assert "embedding-001" not in PR.list_models(http, PR.Candidate("gemini", "G", "gemini", "https://generativelanguage.googleapis.com/v1beta", "k", "m"))
+    assert len(PR.list_models(http, PR.Candidate("anthropic", "A", "anthropic", "https://api.anthropic.com", "k", "m"))) == 3
+
+
+# ---------- AI keys ----------
+def row(**kw):
+    return {"id": 1, "provider": "openai", "label": "OpenAI", "model": "", "base_url": "", "api_key": "sk-secret-abcd", "source": "app", "enabled": 1, "priority": 1010, **kw}
+
+
+def test_keys_become_candidates_and_never_leak(tmp_path):
+    from screening.llm import Health
+    cs = K.candidates_for(row(provider="groq", api_key="gsk_abcdefgh"), {})
+    assert [c.model for c in cs] == ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"] and cs[0].tpm == 8000          # Groq: free models in order
+    assert K.candidates_for(row(provider="groq", api_key="gsk_abcdefgh", model="my-model"), {})[0].model == "my-model"
+    assert K.candidates_for(row(), {})[0].tpm is None and K.candidates_for(row(enabled=0), {}) == [] and K.candidates_for(row(api_key=""), {}) == []
+    assert K.candidates_for(row(provider="custom"), {}) == []                                                                    # needs base URL and model
+    assert K.candidates_for(row(provider="custom", base_url="http://localhost:11434/v1", model="llama3"), {})[0].base_url == "http://localhost:11434/v1"
+    public = K.public_row(row(), Health(), {})
+    assert "api_key" not in public and public["key_hint"] == "…abcd" and "sk-secret" not in str(public)
+    assert K.public_row(row(source="env", api_key=None), Health(), {"OPENAI_API_KEY": "sk-from-env-1234"})["key_hint"] == "…1234"
+    assert K.public_row(row(api_key=""), Health(), {})["status"] == "missing"
+
+
+def test_environment_keys_are_listed_once_without_copying_the_secret(tmp_path):
+    from screening.store import Store
+    s = Store(tmp_path / "k.db")
+    env = {"ANTHROPIC_API_KEY": "sk-ant-1234567890", "GROQ_API_KEY": "gsk_1234567890", "LLM_CUSTOM_API_KEY": "ck-1234567890", "LLM_CUSTOM_BASE_URL": "https://api.mistral.ai/v1",
+           "LLM_CUSTOM_MODEL": "mistral-small-latest"}
+    K.sync_env(s, env)
+    K.sync_env(s, env)                                                                          # idempotent
+    rows = s.list_keys()
+    assert [r["provider"] for r in rows] == ["anthropic", "groq", "custom"] and all(r["api_key"] is None and r["source"] == "env" for r in rows)
+    cands = K.all_candidates(s, env)
+    assert cands[0].provider == "anthropic" and cands[0].api_key == "sk-ant-1234567890" and any(c.base_url == "https://api.mistral.ai/v1" for c in cands)
+    assert K.all_candidates(s, {}) == []                                                        # variable removed: nothing usable, nothing crashes
+
+
+def test_key_form_validation():
+    v = K.validate_new
+    assert v("openai", "sk-" + "x" * 20, "", "") is None and v("nope", "k" * 20, "", "") == "Choose a provider."
+    assert "too short" in v("openai", "abc", "", "") and "spaces" in v("openai", "sk-abc def ghijk", "", "")
+    assert "needs a model" in v("openrouter", "k" * 20, "", "") and "base URL" in v("custom", "k" * 20, "m", "ftp://x")
+    assert v("custom", "k" * 20, "m", "http://localhost:11434/v1") is None and "plain http" in v("custom", "k" * 20, "m", "http://example.com/v1")
+
+
+def test_key_test_proves_a_key_and_explains_failures():
+    def serve(r):
+        if r.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "gpt-4o-mini"}, {"id": "gpt-5-mini"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+    c = PR.Candidate("openai", "OpenAI", "openai", "https://api.openai.com/v1", "sk-test-key", "gpt-4o-mini")
+    ok = K.test_candidate(httpx.Client(transport=httpx.MockTransport(serve)), c)
+    assert ok["ok"] and ok["model"] == "gpt-5-mini"                                              # the best model this key can use
+    bad = K.test_candidate(httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(401, json={"error": {"message": "Incorrect API key"}}))), c)
+    assert not bad["ok"] and bad["kind"] == "auth" and "rejected" in bad["error"]
+    noquota = K.test_candidate(httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(429, json={"error": {"code": "insufficient_quota", "message": "check billing"}}))), c)
+    assert noquota["kind"] == "quota" and "credit" in noquota["error"]
 
 
 def test_pacer_and_parse_json():
@@ -365,7 +596,7 @@ def test_pipeline_survives_verification_failure():
         return base(kw)
     r, _, llm = run(llm_router=flaky)
     assert any(i["stage"] == "verify" and i["severity"] == "error" for i in r["issues"])
-    assert llm.calls == 7  # 2 extractions + verify tried on 2 models x (call + repair) + scoring: optional steps give up early
+    assert llm.calls == 5  # 2 extractions + verify (call + repair, then gives up) + scoring
     assert not any(c["status"] == "verified" for c in r["claims"])
 
 
