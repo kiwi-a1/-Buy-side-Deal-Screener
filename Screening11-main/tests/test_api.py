@@ -95,16 +95,18 @@ def test_deck_and_website_are_both_required(client):
     assert "at most" in screen(client, files=too_many).json()["detail"]
 
 
-def test_a_fund_thesis_is_required_and_recorded_with_the_report(client, tmp_path, monkeypatch):
+def test_a_fund_thesis_is_optional_and_recorded_with_the_report(client, tmp_path, monkeypatch):
     real = server.store
     fresh = Store(tmp_path / "empty.db")                                         # a fresh install: an AI key but no theses at all
     fresh.add_key("openai", "OpenAI", "sk-test-1234567890", model="gpt-4o-mini")
     monkeypatch.setattr(server, "store", fresh)
-    assert "Create a fund thesis first" in screen(client, data={"website": "acme.test", "thesis_id": "1"}).json()["detail"]
+    job = wait_job(client, screen(client, data={"website": "acme.test"}).json()["job_id"])          # no thesis chosen: open screening
+    run = client.get(f"/api/runs/{job['run_id']}").json()
+    assert run["fund"] == "Open screening (no fund thesis)" and run["thesis"]["id"] is None and run["thesis_exists"] is False
+    assert not any(c["state"] == "fail" for c in run["fit"]["checks"]) and "mandate" not in run["decision_reason"]     # nothing can fail an open mandate
+    assert run["thesis"]["data"]["weights"] == sg.DEFAULT_WEIGHTS and run["thesis"]["data"]["geography"] == []
     monkeypatch.setattr(server, "store", real)
-    assert "Choose a fund thesis" in screen(client, data={"website": "acme.test"}).json()["detail"]
     assert "no longer exists" in screen(client, data={"website": "acme.test", "thesis_id": "999"}).json()["detail"]
-    assert "no longer exists" in screen(client, data={"website": "acme.test", "thesis_id": "abc"}).json()["detail"]
     broken = client.post("/api/theses", json={"data": {**sg.TEMPLATES[1]["data"], "fund_name": "Broken"}}, headers=H).json()["id"]
     server.store.save_thesis({**sg.TEMPLATES[1]["data"], "fund_name": "Broken", "stages_core": []}, broken)  # corrupted by hand
     assert "needs fixing" in screen(client, data={"website": "acme.test", "thesis_id": str(broken)}).json()["detail"]
@@ -306,3 +308,10 @@ def test_login_is_rate_limited_and_local_mode_has_no_login(client, monkeypatch):
     server.FAILS.clear()
     monkeypatch.delenv("APP_PASSWORD")
     assert client.get("/api/runs").status_code == 200 and client.get("/api/runs", headers={"host": "evil.example"}).status_code == 403
+
+
+def test_no_password_on_a_public_host_means_no_login(client, monkeypatch):
+    monkeypatch.setattr(server, "PUBLIC", True)                                   # e.g. a hosted copy with HOST=0.0.0.0 and no APP_PASSWORD
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    assert client.get("/api/runs", headers={"host": "screening.example.com"}).status_code == 200
+    assert client.get("/", headers={"host": "screening.example.com"}).status_code == 200

@@ -6,7 +6,7 @@
   <title>Deal Screening</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23111'/><path d='M8 22V10h5a4 4 0 010 8H8' fill='none' stroke='%23FECE14' stroke-width='3'/><path d='M17 22l6-6' stroke='%23FECE14' stroke-width='3' stroke-linecap='round'/></svg>">
 </head>
@@ -47,27 +47,17 @@
       </section>
       <div class="alert alert--danger" id="profiles-error" role="alert" hidden></div>
 
-      <section class="panel gate" id="thesis-gate" aria-labelledby="gate-title" hidden>
-        <p class="eyebrow">Before you start</p>
-        <h2 class="h2" id="gate-title">Create a fund thesis first</h2>
-        <p class="muted">A fund thesis says what you invest in (countries, stages, sectors, round size) and how much each factor counts.
-          Every company is compared against one, so there is nothing to screen until you have it. It takes about two minutes, and you can
-          start from a template.</p>
-        <div class="actions"><a class="btn btn--primary" href="#/thesis/new" id="gate-create">Create a fund thesis</a></div>
-      </section>
-
       <div class="screen-grid" id="screen-body">
         <form id="screen-form" class="panel" novalidate>
           <div class="field thesis-pick">
-            <label class="label" for="thesis-select">Fund thesis <span class="req" aria-hidden="true">*</span><span class="visually-hidden">(required)</span></label>
+            <label class="label" for="thesis-select">Fund thesis <span class="optional">optional · recommended</span></label>
             <div class="thesis-pick__row">
-              <select id="thesis-select" aria-required="true" aria-describedby="thesis-summary thesis-err"></select>
+              <select id="thesis-select" aria-required="true" aria-describedby="thesis-summary"></select>
               <a class="btn btn--ghost btn--sm" href="#/thesis/new">New thesis</a>
               <a class="btn btn--ghost btn--sm" id="thesis-edit" href="#/thesis">Edit</a>
             </div>
             <p class="help" id="thesis-summary"></p>
-            <p class="field-error" id="thesis-err" hidden></p>
-          </div>
+                      </div>
 
           <div class="field">
             <span class="label" id="deck-label">Pitch deck <span class="req" aria-hidden="true">*</span><span class="visually-hidden">(required)</span></span>
@@ -130,6 +120,7 @@
           <div><p class="eyebrow">Screening in progress</p><h2 class="h2" id="progress-title">Analysing</h2></div>
           <span class="mono muted" id="elapsed" aria-label="Elapsed time">0:00</span>
         </div>
+        <div class="progress__bar" aria-hidden="true"><i id="progress-bar"></i></div>
         <ol class="steps" id="steps"></ol>
         <p class="progress__note" id="progress-note" role="status" aria-live="polite"></p>
       </section>
@@ -201,6 +192,21 @@
     </section>
   </main>
 
+  <dialog id="thesis-dialog" aria-labelledby="td-title">
+    <form method="dialog" class="dlg">
+      <p class="eyebrow">Before you start</p>
+      <h2 class="h2" id="td-title">Screen without a fund thesis?</h2>
+      <p class="muted">A fund thesis tells the app what you invest in, so it can check the company against your countries, stages, sectors and round size and
+        weight the scores your way. <strong>Results are better with one.</strong></p>
+      <p class="muted">Without it this will be an <strong>open screening</strong>: any country, stage and sector, standard thresholds (advance at 7, maybe at 5.5)
+        and the default weight for each scoring dimension.</p>
+      <div class="actions dlg__actions">
+        <a class="btn btn--primary" href="#/thesis/new" id="td-create">Create a fund thesis</a>
+        <button class="btn btn--ghost" value="open" id="td-open">Continue with open screening</button>
+        <button class="btn btn--ghost" value="cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <script src="/static/app.js"></script>
   <script src="/static/thesis.js"></script>

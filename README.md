@@ -11,9 +11,11 @@ It runs on your own computer, stores everything locally, and can be used for fre
 
 ## What it does, step by step
 
-1. **Pick a fund thesis.** A thesis is your mandate: target countries, stages, sectors (target / risky / excluded),
+1. **Pick a fund thesis (optional, recommended).** A thesis is your mandate: target countries, stages, sectors (target / risky / excluded),
    round size, decision thresholds and the base weight of each scoring factor. You can keep several (for example a
    seed fund and a Series A fund) and choose one per screening. The editor gives suggestions, templates and presets.
+   If you choose none, the app asks you to confirm and runs an **open screening**: any country, stage and sector, no round limits,
+   standard thresholds (advance at 7, maybe at 5.5) and the default weight for every scoring dimension.
 2. **Add the company.** The pitch deck (PDF) and the website are both required. Up to 5 extra files
    (PDF, Word, text, Markdown, CSV) are optional.
 3. **The app screens it** (about 2 to 4 minutes):
@@ -56,7 +58,7 @@ cp .env.example .env     # optional: put a key here, or add it later on the AI k
 python app.py            # open http://localhost:8501
 ```
 
-On first start the app asks for an AI key (if none is set) and then for a fund thesis. Tests run offline:
+On first start the app asks for an AI key (if none is set). A fund thesis is optional. Tests run offline:
 `python -m pytest -q`.
 
 ## Limits worth knowing

@@ -7,7 +7,7 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .scoring import DIMENSIONS
-from .suggestions import COUNTRIES, STAGE_SLUGS, normalize_country, normalize_stage
+from .suggestions import COUNTRIES, DEFAULT_WEIGHTS, STAGE_SLUGS, normalize_country, normalize_stage
 
 LEGACY_PATH = Path(__file__).resolve().parent.parent / "thesis.yaml"
 
@@ -136,3 +136,11 @@ def check_thesis(t: Thesis) -> tuple[list[str], list[str]]:
 def thesis_summary(t: Thesis) -> dict:
     return {"countries": len(t.geography), "stages": t.stages_core, "sectors": len(t.sectors_strong),
             "ticket": [t.ticket_min_eur, t.ticket_max_eur], "advance_at": t.advance_at, "maybe_at": t.maybe_at}
+
+
+OPEN_NAME = "Open screening (no fund thesis)"
+
+
+def open_thesis() -> Thesis:
+    """Used when no fund thesis is chosen: any country, stage and sector, no round limits, standard thresholds and default weights."""
+    return Thesis(fund_name=OPEN_NAME, weights=dict(DEFAULT_WEIGHTS))

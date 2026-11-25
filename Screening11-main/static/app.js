@@ -50,7 +50,7 @@ const STATUS = {
 };
 const KIND = { independent: "Independent", profile: "Self-reported", company: "Company" };
 const SEVERITY = { error: "tone-bad", warning: "tone-warn", info: "tone-info" };
-const PALETTE = ["#111111", "#FECE14", "#52525B", "#D97706", "#A1A1AA", "#16A34A", "#2563EB", "#7C3AED", "#DB2777", "#0891B2", "#D4D4D8"];
+const PALETTE = ["#5B4CF0", "#14C8B0", "#FF6B9A", "#E08A00", "#8B5CF6", "#12A878", "#2563EB", "#C04BE8", "#0891B2", "#7A7EA0", "#B4B8D9"];
 const badge = (status) => `<span class="badge badge--${esc(status)}" title="${esc(STATUS[status]?.hint || "")}">${esc(STATUS[status]?.label || status)}</span>`;
 
 /* ---------- routing ---------- */
@@ -103,19 +103,20 @@ const selectedThesis = () => theses.find((t) => String(t.id) === $("#thesis-sele
 async function refreshTheses() {
   try { theses = (await api("/api/theses")).filter((t) => t.data); } catch { theses = []; }
   const usable = theses.filter((t) => !t.errors.length);
-  const none = theses.length === 0;
-  $("#thesis-gate").hidden = !none;
-  $("#screen-body").hidden = none;                 // nothing can be screened without a fund thesis
-  const sel = $("#thesis-select"), saved = localStorage.getItem("thesisId") || sel.value;
-  sel.innerHTML = theses.map((t) => `<option value="${t.id}"${t.errors.length ? " disabled" : ""}>${esc(t.name)}${t.errors.length ? " (needs fixing)" : ""}</option>`).join("");
-  const keep = usable.find((t) => String(t.id) === String(saved)) || usable[0];
-  if (keep) sel.value = String(keep.id);
+  const sel = $("#thesis-select"), saved = localStorage.getItem("thesisId");     // "" means the user last chose an open screening
+  sel.innerHTML = `<option value="">Open screening: any country, stage and sector</option>` +
+    theses.map((t) => `<option value="${t.id}"${t.errors.length ? " disabled" : ""}>${esc(t.name)}${t.errors.length ? " (needs fixing)" : ""}</option>`).join("");
+  const keep = saved === "" ? null : usable.find((t) => String(t.id) === String(saved)) || usable[0];
+  sel.value = keep ? String(keep.id) : "";
   showThesisSummary();
 }
 function showThesisSummary() {
   const t = selectedThesis(), el = $("#thesis-summary");
-  $("#thesis-err").hidden = true;
-  if (!t) { el.textContent = ""; return; }
+  if (!t) {
+    el.textContent = "No thesis: the company is screened openly (any country, stage and sector, standard thresholds, default weights). A thesis gives better results.";
+    $("#thesis-edit").hidden = true; localStorage.setItem("thesisId", ""); return;
+  }
+  $("#thesis-edit").hidden = false;
   const s = t.summary, plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const facts = [s.countries ? plural(s.countries, "country").replace("countrys", "countries") : "any country", s.stages.join(", ") || "any stage",
     s.sectors ? plural(s.sectors, "target sector") : "any sector", s.ticket[0] || s.ticket[1] ? `EUR ${(s.ticket[0] / 1e6).toFixed(1)}M-${(s.ticket[1] / 1e6).toFixed(1)}M rounds` : "no round limits",
@@ -125,7 +126,7 @@ function showThesisSummary() {
   localStorage.setItem("thesisId", String(t.id));
 }
 $("#thesis-select").addEventListener("change", showThesisSummary);
-for (const sel of ["#gate-create", "a[href='#/thesis/new']"]) {
+for (const sel of ["#td-create", "a[href='#/thesis/new']"]) {
   document.querySelector("#view-screen").addEventListener("click", (e) => { if (e.target.closest(sel)) sessionStorage.setItem("afterThesis", "screen"); });  // come back after creating
 }
 
@@ -186,19 +187,22 @@ $("#website").addEventListener("input", () => fieldError("website", ""));
 
 function showFormError(msg) { const e = $("#form-error"); e.textContent = msg; e.hidden = !msg; }
 
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
+form.addEventListener("submit", (e) => { e.preventDefault(); submitScreening(false); });
+$("#td-create").addEventListener("click", () => $("#thesis-dialog").close());
+$("#thesis-dialog").addEventListener("close", () => { if ($("#thesis-dialog").returnValue === "open") submitScreening(true); });
+
+async function submitScreening(openConfirmed) {
   showFormError("");
   const site = $("#website").value.trim();
   let firstBad = null;
   const thesis = selectedThesis();
-  if (!thesis) { const e = $("#thesis-err"); e.textContent = "Choose a fund thesis to compare the company against."; e.hidden = false; firstBad = $("#thesis-select"); }
   if (!deckFile) { fieldError("deck", "Upload the pitch deck (PDF)."); firstBad = firstBad || $("#deck"); }
   if (!site) { fieldError("website", "Enter the company's website."); firstBad = firstBad || $("#website"); }
   else if (!/^(https?:\/\/)?[^\s/]+\.[^\s/]{2,}/i.test(site)) { fieldError("website", "That does not look like a website address."); firstBad = firstBad || $("#website"); }
   if (firstBad) { firstBad.focus(); return; }
+  if (!thesis && !openConfirmed) { $("#thesis-dialog").returnValue = ""; $("#thesis-dialog").showModal(); return; }  // recommend a thesis before an open screening
   const fd = new FormData();
-  fd.append("deck", deckFile); fd.append("website", site); fd.append("hint", $("#hint").value.trim()); fd.append("thesis_id", String(thesis.id));
+  fd.append("deck", deckFile); fd.append("website", site); fd.append("hint", $("#hint").value.trim()); fd.append("thesis_id", thesis ? String(thesis.id) : "");
   resFiles.forEach((f) => fd.append("resources", f));
   const btn = $("#go");
   btn.disabled = true; btn.classList.add("is-loading"); btn.textContent = "Uploading...";
@@ -207,9 +211,8 @@ form.addEventListener("submit", async (e) => {
     sessionStorage.setItem("job", job_id);
     startProgress(job_id);
   } catch (err) { showFormError(err.message); resetGo(); }
-});
+}
 function resetGo() { const b = $("#go"); b.classList.remove("is-loading"); b.textContent = "Start screening"; loadHealth(); }
-$("#thesis-select").addEventListener("change", () => { $("#thesis-err").hidden = true; });
 
 /* ---------- progress ---------- */
 function startProgress(jobId) {
@@ -227,6 +230,8 @@ async function poll(jobId) {
     return `<li class="step step--${esc(s.state)}"><span class="step__icon" aria-hidden="true"></span>
       <span class="step__name">${esc(label)}<span class="visually-hidden"> - ${esc(s.state)}</span></span><span class="step__detail">${esc(s.detail)}</span></li>`;
   }).join("");
+  const states = Object.keys(j.step_labels).map((k) => (j.steps[k] || {}).state), finished = states.filter((s) => s === "done" || s === "warning").length;
+  $("#progress-bar").style.width = `${Math.max(4, Math.round(((finished + (states.includes("running") ? 0.5 : 0)) / states.length) * 100))}%`;
   $("#elapsed").textContent = mmss(j.elapsed);
   if ($("#progress-note").textContent !== (j.note || "")) $("#progress-note").textContent = j.note || "";
   if (j.status === "done") { endProgress(); toast("Screening complete"); if (!$("#view-screen").hidden) location.hash = `#/run/${j.run_id}`; return; }
@@ -234,6 +239,14 @@ async function poll(jobId) {
   setTimeout(() => poll(jobId), 1000);
 }
 function endProgress() { sessionStorage.removeItem("job"); $("#progress").hidden = true; $(".screen-grid").hidden = false; resetGo(); }
+
+/* ---------- motion helpers ---------- */
+function countUp(el, to, ms = 900) {
+  if (!el || matchMedia("(prefers-reduced-motion: reduce)").matches || !Number.isFinite(to)) return;
+  const t0 = performance.now();
+  const tick = (t) => { const p = Math.min((t - t0) / ms, 1); el.textContent = fmt(to * (1 - Math.pow(1 - p, 3))); if (p < 1) requestAnimationFrame(tick); else el.textContent = fmt(to); };
+  requestAnimationFrame(tick);
+}
 
 /* ---------- report ---------- */
 const SECTIONS = [["overview", "Overview"], ["flags", "Red flags"], ["claims", "Claim verification"], ["scorecard", "Scorecard"],
@@ -481,6 +494,7 @@ $("#view-run").addEventListener("click", (e) => {
 function bindReport(r) {
   currentRun = r;
   bindDelete(r);
+  countUp($(".verdict__big"), r.overall);
   $("#dim-sort").addEventListener("change", (e) => { dimSort = e.target.value; $("#score-body").innerHTML = scorecardHtml(r); });
   $("#copy-memo").addEventListener("click", async () => { try { copy(await (await fetch(`/api/runs/${r.id}/memo`)).text(), "Memo"); } catch { toast("Could not load the memo"); } });
   $("#copy-qs")?.addEventListener("click", () => copy(r.questions_for_founder.map((q) => `- ${q}`).join("\n"), "Questions"));
@@ -526,7 +540,7 @@ async function setupWhatIf(r) {
   });
   $("#wi-reset").addEventListener("click", () => { render(thesis.weights, thesis.advance_at, thesis.maybe_at); recompute(); });
   const save = $("#wi-save");
-  if (!r.thesis_exists) { save.disabled = true; save.textContent = "Fund thesis was deleted"; }
+  if (!r.thesis_exists) { save.disabled = true; save.textContent = r.thesis.id ? "Fund thesis was deleted" : "Open screening: no thesis to save to"; }
   else save.textContent = `Save to "${r.thesis.name}"`;
   save.addEventListener("click", async () => {
     try {

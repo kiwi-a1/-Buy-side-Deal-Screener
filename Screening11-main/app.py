@@ -38,7 +38,7 @@ from screening.report import to_markdown  # noqa: E402
 from screening.scoring import DIMENSIONS, ProfilesError, evaluate, load_profiles  # noqa: E402
 from screening.store import Store  # noqa: E402
 from screening.suggestions import all_suggestions  # noqa: E402
-from screening.thesis import LEGACY_PATH, Thesis, ThesisError, build_thesis, check_thesis, parse_thesis, thesis_summary  # noqa: E402
+from screening.thesis import LEGACY_PATH, Thesis, ThesisError, build_thesis, check_thesis, open_thesis, parse_thesis, thesis_summary  # noqa: E402
 
 log = logging.getLogger("screening")
 STATIC = Path(__file__).resolve().parent / "static"
@@ -80,7 +80,9 @@ RUN_KW: dict = {}  # extra keyword arguments for analyse(); tests inject fake cr
 
 
 # ---------- access control ----------
-# Local mode (no APP_PASSWORD): only localhost is served. Hosted mode: set APP_PASSWORD and every page and API call needs the login cookie.
+# No APP_PASSWORD: no login. On this computer only localhost is served; on a public HOST anyone with the address gets in.
+# With APP_PASSWORD: every page and API call needs the login cookie.
+PUBLIC = (os.getenv("HOST") or "127.0.0.1") not in ("127.0.0.1", "localhost", "::1")   # listening beyond this computer
 SESSION_DAYS = 14
 FAILS: dict[str, list[float]] = {}   # ip -> times of recent wrong passwords (in memory: resets on restart, fine for one person)
 
@@ -119,7 +121,7 @@ async def local_only(request: Request, call_next):
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Sign in required."}, status_code=401)
             return Response(status_code=303, headers={"Location": "/login"})
-    else:  # also blocks DNS-rebinding
+    elif not PUBLIC:  # also blocks DNS-rebinding
         host = request.headers.get("host") or ""
         host = host.split("]")[0] + "]" if host.startswith("[") else host.rsplit(":", 1)[0]  # strip the port
         if host not in LOCAL_HOSTS:
@@ -213,17 +215,17 @@ async def start_screen(deck: Optional[UploadFile] = File(None), website: str = F
     sync_env(store)
     if not all_candidates(store):
         raise HTTPException(400, "Add an AI key first (Anthropic, OpenAI, Gemini, OpenRouter, Groq or another provider) under AI keys.")
-    if not store.list_theses():
-        raise HTTPException(400, "Create a fund thesis first: it defines what each company is compared against.")
     row = store.get_thesis(int(thesis_id)) if thesis_id.strip().isdigit() else None
-    if row is None:
-        raise HTTPException(400, "Choose a fund thesis to compare the company against." if not thesis_id.strip()
-                            else "That fund thesis no longer exists. Choose another.")
+    if thesis_id.strip() and row is None:
+        raise HTTPException(400, "That fund thesis no longer exists. Choose another.")
     try:
-        thesis = build_thesis(row["data"])
-        errors, _ = check_thesis(thesis)
-        if errors:
-            raise ThesisError(f"The fund thesis '{row['name']}' needs fixing before it can be used: {errors[0]}")
+        if row is None:  # no thesis chosen: an open screening with standard thresholds and default weights
+            thesis = open_thesis()
+        else:
+            thesis = build_thesis(row["data"])
+            errors, _ = check_thesis(thesis)
+            if errors:
+                raise ThesisError(f"The fund thesis '{row['name']}' needs fixing before it can be used: {errors[0]}")
     except ThesisError as e:
         raise HTTPException(400, str(e))
     try:
@@ -253,7 +255,7 @@ async def start_screen(deck: Optional[UploadFile] = File(None), website: str = F
         finished = [k for k, j in sorted(JOBS.items(), key=lambda kv: kv[1]["created"]) if j["status"] in ("done", "error")]
         for old in finished[:-20]:  # forget old finished jobs only; never a queued or running one
             JOBS.pop(old, None)
-    POOL.submit(_run, job_id, inp, thesis, row["id"])
+    POOL.submit(_run, job_id, inp, thesis, row["id"] if row else None)
     return {"job_id": job_id}
 
 
@@ -542,7 +544,7 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT") or 8501)
     host = os.getenv("HOST") or "127.0.0.1"
-    if host not in ("127.0.0.1", "localhost", "::1") and not _password():
-        raise SystemExit("Refusing to listen on a public address without a password. Set APP_PASSWORD (a long one) and start again.")
+    if PUBLIC and not _password():
+        print("  WARNING: no APP_PASSWORD is set, so anyone who has this address can use the app and your AI keys. Set APP_PASSWORD to lock it.")
     print(f"\n  Deal Screening is running:  http://localhost:{port}\n  (Ctrl-C to stop)\n")
     uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=True, forwarded_allow_ips="*")
