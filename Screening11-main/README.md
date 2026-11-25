@@ -97,7 +97,7 @@ Code, not the AI, makes this comparison, and every row in the report shows what 
 
 | File | Purpose |
 |---|---|
-| `app.py` | web server (FastAPI) + JSON API; localhost only by default; optional login when `APP_PASSWORD` is set |
+| `app.py` | web server (FastAPI) + JSON API; localhost only by default; optional login when `REQUIRE_LOGIN=1` and `APP_PASSWORD` are set |
 | `Dockerfile`, `render.yaml`, `DEPLOY.md` | private hosted copy (see DEPLOY.md) |
 | `static/` | the web UI: `index.html`, `style.css`, `app.js`, `thesis.js` (no build step) |
 | `screening/pipeline.py` | the 6-step pipeline |

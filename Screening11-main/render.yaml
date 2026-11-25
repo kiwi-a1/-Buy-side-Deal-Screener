@@ -11,7 +11,5 @@ services:
       mountPath: /data
       sizeGB: 1
     envVars:
-      - key: APP_PASSWORD
-        sync: false          # optional login; leave it empty in the dashboard for no password
       - key: GROQ_API_KEY
         sync: false          # optional: or add keys later on the app's AI keys page

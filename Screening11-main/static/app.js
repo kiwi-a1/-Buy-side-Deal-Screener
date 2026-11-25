@@ -617,3 +617,18 @@ window.addEventListener("DOMContentLoaded", () => {
   const pending = sessionStorage.getItem("job");
   if (pending) { location.hash = "#/screen"; startProgress(pending); }
 });
+
+
+/* ---------- light / dark theme ---------- */
+(function () {
+  const root = document.documentElement, btn = $("#theme-btn");
+  const current = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const paint = () => { const dark = current() === "dark"; btn.textContent = dark ? "☀" : "☾"; btn.setAttribute("aria-pressed", String(dark)); };
+  btn.addEventListener("click", () => {
+    const next = current() === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("theme", next); } catch { /* private mode: the choice just lasts this visit */ }
+    paint();
+  });
+  paint();
+})();

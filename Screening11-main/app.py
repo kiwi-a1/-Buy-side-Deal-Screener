@@ -80,15 +80,16 @@ RUN_KW: dict = {}  # extra keyword arguments for analyse(); tests inject fake cr
 
 
 # ---------- access control ----------
-# No APP_PASSWORD: no login. On this computer only localhost is served; on a public HOST anyone with the address gets in.
-# With APP_PASSWORD: every page and API call needs the login cookie.
+# No login by default (even if an APP_PASSWORD variable is lying around). To turn it on set BOTH REQUIRE_LOGIN=1 and APP_PASSWORD.
+# Without login: On this computer only localhost is served; on a public HOST anyone with the address gets in.
+# With login: every page and API call needs the login cookie.
 PUBLIC = (os.getenv("HOST") or "127.0.0.1") not in ("127.0.0.1", "localhost", "::1")   # listening beyond this computer
 SESSION_DAYS = 14
 FAILS: dict[str, list[float]] = {}   # ip -> times of recent wrong passwords (in memory: resets on restart, fine for one person)
 
 
 def _password() -> str:
-    return os.getenv("APP_PASSWORD", "")
+    return os.getenv("APP_PASSWORD", "") if os.getenv("REQUIRE_LOGIN") == "1" else ""   # a leftover APP_PASSWORD alone never turns the login on
 
 
 def _sign(expiry: int) -> str:
@@ -545,6 +546,6 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT") or 8501)
     host = os.getenv("HOST") or "127.0.0.1"
     if PUBLIC and not _password():
-        print("  WARNING: no APP_PASSWORD is set, so anyone who has this address can use the app and your AI keys. Set APP_PASSWORD to lock it.")
+        print("  WARNING: no login is enabled, so anyone who has this address can use the app and your AI keys. Set REQUIRE_LOGIN=1 and APP_PASSWORD to lock it.")
     print(f"\n  Deal Screening is running:  http://localhost:{port}\n  (Ctrl-C to stop)\n")
     uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=True, forwarded_allow_ips="*")

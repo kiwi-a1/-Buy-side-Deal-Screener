@@ -286,7 +286,7 @@ def test_key_endpoints_need_the_header_like_every_write(keys_client):
 
 # ---------- hosted mode: APP_PASSWORD ----------
 def test_password_protects_everything_when_set(client, monkeypatch):
-    monkeypatch.setenv("APP_PASSWORD", "correct-horse-battery")
+    monkeypatch.setenv("APP_PASSWORD", "correct-horse-battery"); monkeypatch.setenv("REQUIRE_LOGIN", "1")
     hosted = {"host": "screening.example.com"}                                  # not localhost: allowed only because a password is set
     assert client.get("/api/runs", headers=hosted).status_code == 401
     assert client.get("/", headers=hosted, follow_redirects=False).headers["location"] == "/login"
@@ -300,7 +300,7 @@ def test_password_protects_everything_when_set(client, monkeypatch):
 
 
 def test_login_is_rate_limited_and_local_mode_has_no_login(client, monkeypatch):
-    monkeypatch.setenv("APP_PASSWORD", "correct-horse-battery")
+    monkeypatch.setenv("APP_PASSWORD", "correct-horse-battery"); monkeypatch.setenv("REQUIRE_LOGIN", "1")
     server.FAILS.clear()
     codes = [client.post("/api/login", json={"password": "x"}, headers=H).status_code for _ in range(7)]
     assert codes[:5] == [401] * 5 and codes[5:] == [429, 429]
@@ -315,3 +315,10 @@ def test_no_password_on_a_public_host_means_no_login(client, monkeypatch):
     monkeypatch.delenv("APP_PASSWORD", raising=False)
     assert client.get("/api/runs", headers={"host": "screening.example.com"}).status_code == 200
     assert client.get("/", headers={"host": "screening.example.com"}).status_code == 200
+
+
+def test_a_leftover_password_alone_does_not_turn_the_login_on(client, monkeypatch):
+    monkeypatch.setattr(server, "PUBLIC", True)
+    monkeypatch.setenv("APP_PASSWORD", "left-over-from-before")
+    monkeypatch.delenv("REQUIRE_LOGIN", raising=False)
+    assert client.get("/api/runs", headers={"host": "screening.example.com"}).status_code == 200
