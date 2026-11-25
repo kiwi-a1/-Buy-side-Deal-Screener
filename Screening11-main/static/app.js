@@ -50,7 +50,7 @@ const STATUS = {
 };
 const KIND = { independent: "Independent", profile: "Self-reported", company: "Company" };
 const SEVERITY = { error: "tone-bad", warning: "tone-warn", info: "tone-info" };
-const PALETTE = ["#5B4CF0", "#14C8B0", "#FF6B9A", "#E08A00", "#8B5CF6", "#12A878", "#2563EB", "#C04BE8", "#0891B2", "#7A7EA0", "#B4B8D9"];
+const PALETTE = ["#1F3A5F", "#3E7CB1", "#7FA7C9", "#2E8B7A", "#A66A00", "#6B7689", "#8E5572", "#4F6D8F", "#B3261E", "#9AA5B5", "#C9D0DA"];
 const badge = (status) => `<span class="badge badge--${esc(status)}" title="${esc(STATUS[status]?.hint || "")}">${esc(STATUS[status]?.label || status)}</span>`;
 
 /* ---------- routing ---------- */
@@ -239,14 +239,6 @@ async function poll(jobId) {
   setTimeout(() => poll(jobId), 1000);
 }
 function endProgress() { sessionStorage.removeItem("job"); $("#progress").hidden = true; $(".screen-grid").hidden = false; resetGo(); }
-
-/* ---------- motion helpers ---------- */
-function countUp(el, to, ms = 900) {
-  if (!el || matchMedia("(prefers-reduced-motion: reduce)").matches || !Number.isFinite(to)) return;
-  const t0 = performance.now();
-  const tick = (t) => { const p = Math.min((t - t0) / ms, 1); el.textContent = fmt(to * (1 - Math.pow(1 - p, 3))); if (p < 1) requestAnimationFrame(tick); else el.textContent = fmt(to); };
-  requestAnimationFrame(tick);
-}
 
 /* ---------- report ---------- */
 const SECTIONS = [["overview", "Overview"], ["flags", "Red flags"], ["claims", "Claim verification"], ["scorecard", "Scorecard"],
@@ -494,7 +486,6 @@ $("#view-run").addEventListener("click", (e) => {
 function bindReport(r) {
   currentRun = r;
   bindDelete(r);
-  countUp($(".verdict__big"), r.overall);
   $("#dim-sort").addEventListener("change", (e) => { dimSort = e.target.value; $("#score-body").innerHTML = scorecardHtml(r); });
   $("#copy-memo").addEventListener("click", async () => { try { copy(await (await fetch(`/api/runs/${r.id}/memo`)).text(), "Memo"); } catch { toast("Could not load the memo"); } });
   $("#copy-qs")?.addEventListener("click", () => copy(r.questions_for_founder.map((q) => `- ${q}`).join("\n"), "Questions"));
@@ -617,18 +608,3 @@ window.addEventListener("DOMContentLoaded", () => {
   const pending = sessionStorage.getItem("job");
   if (pending) { location.hash = "#/screen"; startProgress(pending); }
 });
-
-
-/* ---------- light / dark theme ---------- */
-(function () {
-  const root = document.documentElement, btn = $("#theme-btn");
-  const current = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  const paint = () => { const dark = current() === "dark"; btn.textContent = dark ? "☀" : "☾"; btn.setAttribute("aria-pressed", String(dark)); };
-  btn.addEventListener("click", () => {
-    const next = current() === "dark" ? "light" : "dark";
-    root.dataset.theme = next;
-    try { localStorage.setItem("theme", next); } catch { /* private mode: the choice just lasts this visit */ }
-    paint();
-  });
-  paint();
-})();
